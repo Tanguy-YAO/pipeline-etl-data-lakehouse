@@ -11,8 +11,6 @@ def creer_base():
     """Crée la base SQLite avec des données de catégories"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-
-    # Création de la table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY,
@@ -21,8 +19,6 @@ def creer_base():
             nb_livres_estimes INTEGER
         )
     """)
-
-    # Insertion des données
     categories = [
         (1, "Fiction",      "Romans et histoires imaginaires",    450000),
         (2, "Science",      "Livres scientifiques et techniques", 120000),
@@ -33,12 +29,10 @@ def creer_base():
         (7, "Economie",     "Finance, business et management",     75000),
         (8, "Enfants",      "Livres pour enfants et jeunesse",    300000),
     ]
-
     cursor.executemany(
         "INSERT OR IGNORE INTO categories VALUES (?, ?, ?, ?)",
         categories
     )
-
     conn.commit()
     conn.close()
     print("Base SQLite créée avec succès !")
@@ -62,12 +56,9 @@ def upload_vers_minio(df):
         aws_access_key_id="minioadmin",
         aws_secret_access_key="minioadmin"
     )
-
     today = datetime.now().strftime("%Y-%m-%d")
     fichier_minio = f"sql/categories_{today}.json"
-
     contenu = df.to_json(orient="records", force_ascii=False)
-
     client.put_object(
         Bucket="bronze",
         Key=fichier_minio,

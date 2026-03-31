@@ -7,7 +7,17 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, "/home/hp/projet-data-eng")
 
+from extractors.csv_reader import lire_et_nettoyer, upload_vers_minio as csv_upload
+from extractors.sql_reader import creer_base, lire_categories, upload_vers_minio as sql_upload
+
 # ══ Tests csv_reader ══
+
+def test_lire_et_nettoyer_retourne_dataframe():
+    df = lire_et_nettoyer()
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) > 0
+    assert "isbn" in df.columns
+    assert "titre" in df.columns
 
 def test_colonnes_apres_nettoyage():
     data = {"ISBN": ["123"], "Book-Title": ["Test"], "Book-Author": ["Auteur"],
@@ -25,20 +35,6 @@ def test_suppression_lignes_vides():
             "editeur": ["Ed1", "Ed2", "Ed3"]}
     df = pd.DataFrame(data).dropna()
     assert len(df) == 1
-
-def test_renommage_colonnes():
-    data = {"ISBN": ["123"], "Book-Title": ["Test"], "Book-Author": ["Auteur"],
-            "Year-Of-Publication": ["2020"], "Publisher": ["Editeur"]}
-    df = pd.DataFrame(data)
-    df.columns = ["isbn", "titre", "auteur", "annee_publication", "editeur"]
-    assert list(df.columns) == ["isbn", "titre", "auteur", "annee_publication", "editeur"]
-
-def test_dataframe_non_vide():
-    data = {"isbn": ["123", "456"], "titre": ["Livre A", "Livre B"],
-            "auteur": ["A1", "A2"], "annee_publication": ["2020", "2021"],
-            "editeur": ["Ed1", "Ed2"]}
-    df = pd.DataFrame(data)
-    assert len(df) > 0
 
 def test_csv_to_json_conversion():
     data = {"isbn": ["123"], "titre": ["Test"], "auteur": ["Auteur"],
@@ -61,19 +57,15 @@ def test_upload_csv_minio_mock():
 
 # ══ Tests sql_reader ══
 
-def test_creation_base_sqlite(tmp_path):
-    db_path = str(tmp_path / "test.sqlite")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE IF NOT EXISTS categories (
-        id INTEGER PRIMARY KEY, genre VARCHAR(50),
-        description TEXT, nb_livres_estimes INTEGER)""")
-    cursor.execute("INSERT INTO categories VALUES (1, 'Fiction', 'Romans', 450000)")
-    conn.commit()
-    df = pd.read_sql("SELECT * FROM categories", conn)
-    conn.close()
-    assert len(df) == 1
-    assert df.iloc[0]["genre"] == "Fiction"
+def test_creer_base_et_lire(tmp_path):
+    import extractors.sql_reader as sql
+    original_path = sql.DB_PATH
+    sql.DB_PATH = str(tmp_path / "test.sqlite")
+    creer_base()
+    df = lire_categories()
+    sql.DB_PATH = original_path
+    assert len(df) == 8
+    assert isinstance(df, pd.DataFrame)
 
 def test_nombre_categories():
     categories = [(1,"Fiction"),(2,"Science"),(3,"Histoire"),(4,"Philosophie"),
@@ -109,19 +101,6 @@ def test_insert_or_ignore(tmp_path):
     df = pd.read_sql("SELECT * FROM categories", conn)
     conn.close()
     assert len(df) == 1
-
-def test_colonnes_categories(tmp_path):
-    db_path = str(tmp_path / "test.sqlite")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE categories (id INTEGER PRIMARY KEY,
-        genre VARCHAR(50), description TEXT, nb_livres_estimes INTEGER)""")
-    conn.commit()
-    df = pd.read_sql("SELECT * FROM categories", conn)
-    conn.close()
-    assert "genre" in df.columns
-    assert "description" in df.columns
-    assert "nb_livres_estimes" in df.columns
 
 def test_upload_sql_minio_mock():
     with patch("boto3.client") as mock_client:

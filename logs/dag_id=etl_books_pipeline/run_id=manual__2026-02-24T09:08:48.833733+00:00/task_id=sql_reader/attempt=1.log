@@ -1,0 +1,26 @@
+[2026-02-24T09:08:50.553+0000] {taskinstance.py:1956} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: etl_books_pipeline.sql_reader manual__2026-02-24T09:08:48.833733+00:00 [queued]>
+[2026-02-24T09:08:50.564+0000] {taskinstance.py:1956} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: etl_books_pipeline.sql_reader manual__2026-02-24T09:08:48.833733+00:00 [queued]>
+[2026-02-24T09:08:50.565+0000] {taskinstance.py:2170} INFO - Starting attempt 1 of 4
+[2026-02-24T09:08:50.598+0000] {taskinstance.py:2191} INFO - Executing <Task(PythonOperator): sql_reader> on 2026-02-24 09:08:48.833733+00:00
+[2026-02-24T09:08:50.606+0000] {standard_task_runner.py:60} INFO - Started process 3996 to run task
+[2026-02-24T09:08:50.612+0000] {standard_task_runner.py:87} INFO - Running: ['***', 'tasks', 'run', 'etl_books_pipeline', 'sql_reader', 'manual__2026-02-24T09:08:48.833733+00:00', '--job-id', '6', '--raw', '--subdir', 'DAGS_FOLDER/etl_pipeline.py', '--cfg-path', '/tmp/tmp51c9vlzw']
+[2026-02-24T09:08:50.616+0000] {standard_task_runner.py:88} INFO - Job 6: Subtask sql_reader
+[2026-02-24T09:08:50.704+0000] {task_command.py:423} INFO - Running <TaskInstance: etl_books_pipeline.sql_reader manual__2026-02-24T09:08:48.833733+00:00 [running]> on host b6063be8d0e5
+[2026-02-24T09:08:50.844+0000] {taskinstance.py:2480} INFO - Exporting env vars: AIRFLOW_CTX_DAG_OWNER='data_engineer_tanguy' AIRFLOW_CTX_DAG_ID='etl_books_pipeline' AIRFLOW_CTX_TASK_ID='sql_reader' AIRFLOW_CTX_EXECUTION_DATE='2026-02-24T09:08:48.833733+00:00' AIRFLOW_CTX_TRY_NUMBER='1' AIRFLOW_CTX_DAG_RUN_ID='manual__2026-02-24T09:08:48.833733+00:00'
+[2026-02-24T09:08:50.924+0000] {taskinstance.py:2698} ERROR - Task failed with exception
+Traceback (most recent call last):
+  File "/home/airflow/.local/lib/python3.8/site-packages/airflow/models/taskinstance.py", line 433, in _execute_task
+    result = execute_callable(context=context, **execute_callable_kwargs)
+  File "/home/airflow/.local/lib/python3.8/site-packages/airflow/operators/python.py", line 199, in execute
+    return_value = self.execute_callable()
+  File "/home/airflow/.local/lib/python3.8/site-packages/airflow/operators/python.py", line 216, in execute_callable
+    return self.python_callable(*self.op_args, **self.op_kwargs)
+  File "/opt/airflow/dags/etl_pipeline.py", line 32, in run_sql_reader
+    subprocess.run(["python3", "/home/hp/projet-data-eng/extractors/sql_reader.py"], check=True)
+  File "/usr/local/lib/python3.8/subprocess.py", line 516, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['python3', '/home/hp/projet-data-eng/extractors/sql_reader.py']' returned non-zero exit status 2.
+[2026-02-24T09:08:50.942+0000] {taskinstance.py:1138} INFO - Marking task as UP_FOR_RETRY. dag_id=etl_books_pipeline, task_id=sql_reader, execution_date=20260224T090848, start_date=20260224T090850, end_date=20260224T090850
+[2026-02-24T09:08:50.965+0000] {standard_task_runner.py:107} ERROR - Failed to execute job 6 for task sql_reader (Command '['python3', '/home/hp/projet-data-eng/extractors/sql_reader.py']' returned non-zero exit status 2.; 3996)
+[2026-02-24T09:08:50.986+0000] {local_task_job_runner.py:234} INFO - Task exited with return code 1
+[2026-02-24T09:08:51.028+0000] {taskinstance.py:3280} INFO - 0 downstream tasks scheduled from follow-on schedule check
