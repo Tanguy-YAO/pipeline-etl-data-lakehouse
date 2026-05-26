@@ -1,0 +1,20 @@
+# Credentials - Attention à ne JAMAIS les committer
+.env
+
+# Python
+__pyache__/
+*.pyc
+.venv/
+venv/
+
+# Logs et fichiers d'erreur
+*/log
+error_contracts/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Airflow
+airflow.db
+airflow.cfg
