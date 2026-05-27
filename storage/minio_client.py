@@ -107,23 +107,42 @@ def upload_json(client, bucket_name, data, source, entity, page=None):
 def upload_csv(client, bucket_name, file_path, source, entity):
     """
     Sauvegarde un fichier CSV local dans MinIO Bronze.
-    Utilisé pour les exports SURGE.
-    
+    Utilise le multipart upload pour les gros fichiers.
     Chemin généré :
-    bronze/surge/transactions/2025/06/15/transactions.csv
+    bronze/surge/payments/2026/05/27/payments.csv
     """
     now = datetime.now(timezone.utc)
     date_path = now.strftime("%Y/%m/%d")
     object_key = f"bronze/{source}/{entity}/{date_path}/{entity}.csv"
 
-    # fput_object lit directement le fichier local
-    # Plus efficace que de le charger en mémoire d'abord
-    client.fput_object(
-        bucket_name=bucket_name,
-        object_name=object_key,
-        file_path=file_path,
-        content_type="text/csv",
-    )
+    file_size = os.path.getsize(file_path)
+    logger.info(f"Upload CSV : {file_path} ({file_size / 1024 / 1024:.1f} MB)")
+
+    # Seuil multipart : 100 MB
+    # En dessous → upload simple
+    # Au dessus  → multipart par morceaux de 50 MB
+    MULTIPART_THRESHOLD = 100 * 1024 * 1024   # 100 MB
+    PART_SIZE           = 50  * 1024 * 1024   # 50 MB
+
+    if file_size > MULTIPART_THRESHOLD:
+        logger.info(f"Fichier > 100MB → multipart upload ({file_size / 1024 / 1024:.0f} MB)")
+        
+        # fput_object gère automatiquement le multipart
+        # si part_size est spécifié
+        client.fput_object(
+            bucket_name=bucket_name,
+            object_name=object_key,
+            file_path=file_path,
+            content_type="text/csv",
+            part_size=PART_SIZE,
+        )
+    else:
+        client.fput_object(
+            bucket_name=bucket_name,
+            object_name=object_key,
+            file_path=file_path,
+            content_type="text/csv",
+        )
 
     logger.info(f"CSV uploadé → {object_key}")
     return object_key
