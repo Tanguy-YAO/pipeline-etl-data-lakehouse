@@ -1,12 +1,20 @@
 -- gold/unified_contracts.sql
 -- VUE UNIFIÉE — Contrats UPYA (TEVIA + GREENO) + SURGE
 --
--- v3 : Enrichissement SURGE avec surge_product_lookup
---      (total_contract_value, upfront_payment, monthly_payment, deal_type)
+-- v4 : Ajout colonne "categorie" pour segmentation métier
+--   surge_neotci  → contrats cédés à NEoT Capital/Meridiam
+--   surge_tevia   → nouveaux contrats SURGE depuis avril 2024
+--   surge_zeci    → autres contrats SURGE
+--   upya_tevia    → tous les contrats UPYA
 
 CREATE OR REPLACE VIEW gold.unified_contracts AS
 
 WITH
+
+-- Liste des contrats NEoT Capital
+neotci AS (
+    SELECT contract_number FROM silver.surge_neotci_list
+),
 
 -- Calcul des montants SURGE depuis les transactions
 surge_financials AS (
@@ -29,6 +37,7 @@ upya AS (
             ELSE 'TEVIA'
         END                                AS entite,
         'UPYA'                             AS source,
+        'upya_tevia'                       AS categorie,
         c.client_number,
         c.customer_name,
         c.agent_number,
@@ -57,12 +66,20 @@ upya AS (
       AND c.signing_date IS NOT NULL
 ),
 
--- Contrats SURGE enrichis avec product_lookup
+-- Contrats SURGE enrichis
 surge AS (
     SELECT
         s.installation_id                  AS contract_number,
         'SURGE'                            AS entite,
         'SURGE'                            AS source,
+        -- Catégorie métier SURGE
+        CASE
+            WHEN s.installation_id::TEXT IN (SELECT contract_number FROM neotci)
+                THEN 'surge_neotci'
+            WHEN s.paid_at >= '2024-04-01'
+                THEN 'surge_tevia'
+            ELSE 'surge_zeci'
+        END                                AS categorie,
         s.customer_id                      AS client_number,
         s.customer_name,
         NULL::TEXT                         AS agent_number,
@@ -72,18 +89,13 @@ surge AS (
         s.paid_at                          AS last_status_update,
         s.unlocked_until                   AS next_status_update,
         NULL::DATE                         AS paid_off_date,
-        -- product_name depuis lookup si disponible
         COALESCE(pl.product_name, s.financial_type) AS product_name,
         NULL::TEXT                         AS asset_number,
-        -- deal_type depuis lookup si disponible
         COALESCE(pl.deal_type, 'PAYG')     AS deal_type_raw,
-        -- Financier depuis lookup
         pl.total_contract_value,
         pl.upfront_payment,
         pl.monthly_payment,
-        -- total_paid calculé depuis les transactions
         COALESCE(sf.total_paid, 0)         AS total_paid,
-        -- remaining_debt calculé si on a total_contract_value
         CASE
             WHEN pl.total_contract_value IS NOT NULL
             THEN GREATEST(0, pl.total_contract_value - COALESCE(sf.total_paid, 0))
@@ -116,11 +128,11 @@ normalized AS (
     SELECT
         *,
         CASE
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('ACTIVE', 'ENABLED')        THEN 'ENABLED'
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('DISABLED', 'REPOSSESSED')   THEN 'REPOSSESSED'
+            WHEN UPPER(TRIM(contract_status_raw)) IN ('ACTIVE', 'ENABLED')         THEN 'ENABLED'
+            WHEN UPPER(TRIM(contract_status_raw)) IN ('DISABLED', 'REPOSSESSED')    THEN 'REPOSSESSED'
             WHEN UPPER(TRIM(contract_status_raw)) IN ('AWAITING REMOVAL', 'LOCKED') THEN 'LOCKED'
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('PAID_OFF', 'PAIDOFF')       THEN 'PAID_OFF'
-            WHEN UPPER(TRIM(contract_status_raw)) = 'CANCELLED'                    THEN 'CANCELLED'
+            WHEN UPPER(TRIM(contract_status_raw)) IN ('PAID_OFF', 'PAIDOFF')        THEN 'PAID_OFF'
+            WHEN UPPER(TRIM(contract_status_raw)) = 'CANCELLED'                     THEN 'CANCELLED'
             ELSE UPPER(TRIM(contract_status_raw))
         END AS contract_status,
         CASE
@@ -140,6 +152,7 @@ SELECT
     contract_number,
     entite,
     source,
+    categorie,
     client_number,
     customer_name,
     agent_number,
@@ -182,6 +195,7 @@ SELECT
 FROM normalized;
 
 COMMENT ON VIEW gold.unified_contracts IS
-'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v3.
-SURGE enrichi avec surge_product_lookup (total_contract_value, deal_type).
-remaining_debt SURGE calculé = total_contract_value - total_paid.';
+'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v4.
+Segmentation categorie: surge_neotci, surge_tevia, surge_zeci, upya_tevia.
+Source: silver.upya_contracts + silver.surge_contracts + silver.surge_payments
+      + silver.surge_asset_mapping + silver.surge_product_lookup + silver.surge_neotci_list';
