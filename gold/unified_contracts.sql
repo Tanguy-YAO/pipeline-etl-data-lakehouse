@@ -1,9 +1,8 @@
 -- gold/unified_contracts.sql
 -- VUE UNIFIÉE — Contrats UPYA (TEVIA + GREENO) + SURGE
 --
--- Corrections v2 :
--- - PAIDOFF → PAID_OFF (normalisation statut)
--- - Ivory Cost → TEVIA (reclassification entité)
+-- v3 : Enrichissement SURGE avec surge_product_lookup
+--      (total_contract_value, upfront_payment, monthly_payment, deal_type)
 
 CREATE OR REPLACE VIEW gold.unified_contracts AS
 
@@ -21,11 +20,10 @@ surge_financials AS (
     GROUP BY m.installation_id
 ),
 
--- Contrats UPYA
+-- Contrats UPYA (TEVIA + GREENO)
 upya AS (
     SELECT
         c.contract_number,
-        -- Reclassification entité : seuls TEVIA et GREENO sont valides
         CASE
             WHEN c.entity_name IN ('TEVIA', 'GREENO') THEN c.entity_name
             ELSE 'TEVIA'
@@ -59,7 +57,7 @@ upya AS (
       AND c.signing_date IS NOT NULL
 ),
 
--- Contrats SURGE
+-- Contrats SURGE enrichis avec product_lookup
 surge AS (
     SELECT
         s.installation_id                  AS contract_number,
@@ -74,14 +72,23 @@ surge AS (
         s.paid_at                          AS last_status_update,
         s.unlocked_until                   AS next_status_update,
         NULL::DATE                         AS paid_off_date,
-        s.financial_type                   AS product_name,
+        -- product_name depuis lookup si disponible
+        COALESCE(pl.product_name, s.financial_type) AS product_name,
         NULL::TEXT                         AS asset_number,
-        NULL::TEXT                         AS deal_type_raw,
-        NULL::NUMERIC                      AS total_contract_value,
-        NULL::NUMERIC                      AS upfront_payment,
-        NULL::NUMERIC                      AS monthly_payment,
+        -- deal_type depuis lookup si disponible
+        COALESCE(pl.deal_type, 'PAYG')     AS deal_type_raw,
+        -- Financier depuis lookup
+        pl.total_contract_value,
+        pl.upfront_payment,
+        pl.monthly_payment,
+        -- total_paid calculé depuis les transactions
         COALESCE(sf.total_paid, 0)         AS total_paid,
-        NULL::NUMERIC                      AS remaining_debt,
+        -- remaining_debt calculé si on a total_contract_value
+        CASE
+            WHEN pl.total_contract_value IS NOT NULL
+            THEN GREATEST(0, pl.total_contract_value - COALESCE(sf.total_paid, 0))
+            ELSE NULL
+        END                                AS remaining_debt,
         s.status                           AS contract_status_raw,
         CASE
             WHEN s.removed_at IS NOT NULL THEN 'yes'
@@ -91,7 +98,10 @@ surge AS (
         s.ward                             AS sub_prefecture,
         NULL::TEXT                         AS village
     FROM silver.surge_contracts s
-    LEFT JOIN surge_financials sf ON sf.installation_id = s.installation_id
+    LEFT JOIN surge_financials sf
+        ON sf.installation_id = s.installation_id
+    LEFT JOIN silver.surge_product_lookup pl
+        ON pl.installation_id = s.installation_id::TEXT
 ),
 
 -- Union des deux sources
@@ -105,36 +115,23 @@ unified_raw AS (
 normalized AS (
     SELECT
         *,
-        -- Statut normalisé
-        -- UPYA   : ENABLED, LOCKED, PAID_OFF, PAIDOFF, REPOSSESSED, CANCELLED
-        -- SURGE  : Active, Locked, Awaiting Removal, Disabled, Repossessed
         CASE
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('ACTIVE', 'ENABLED')
-                THEN 'ENABLED'
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('DISABLED', 'REPOSSESSED')
-                THEN 'REPOSSESSED'
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('AWAITING REMOVAL', 'LOCKED')
-                THEN 'LOCKED'
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('PAID_OFF', 'PAIDOFF')
-                THEN 'PAID_OFF'
-            WHEN UPPER(TRIM(contract_status_raw)) = 'CANCELLED'
-                THEN 'CANCELLED'
+            WHEN UPPER(TRIM(contract_status_raw)) IN ('ACTIVE', 'ENABLED')        THEN 'ENABLED'
+            WHEN UPPER(TRIM(contract_status_raw)) IN ('DISABLED', 'REPOSSESSED')   THEN 'REPOSSESSED'
+            WHEN UPPER(TRIM(contract_status_raw)) IN ('AWAITING REMOVAL', 'LOCKED') THEN 'LOCKED'
+            WHEN UPPER(TRIM(contract_status_raw)) IN ('PAID_OFF', 'PAIDOFF')       THEN 'PAID_OFF'
+            WHEN UPPER(TRIM(contract_status_raw)) = 'CANCELLED'                    THEN 'CANCELLED'
             ELSE UPPER(TRIM(contract_status_raw))
         END AS contract_status,
-
-        -- Paid off normalisé
         CASE
             WHEN LOWER(TRIM(paid_off_raw)) IN ('yes', 'true', '1') THEN 'true'
             ELSE 'false'
         END AS paid_off,
-
-        -- Deal type normalisé
         CASE
             WHEN UPPER(TRIM(deal_type_raw)) IN ('NO', 'PAYG')  THEN 'PAYG'
             WHEN UPPER(TRIM(deal_type_raw)) IN ('YES', 'FULL') THEN 'FULL'
             ELSE 'PAYG'
         END AS deal_type
-
     FROM unified_raw
 )
 
@@ -165,10 +162,6 @@ SELECT
     region,
     sub_prefecture,
     village,
-
-    -- Jours consécutifs de retard
-    -- NULL si FULL, REPOSSESSED, PAID_OFF, CANCELLED
-    -- Sinon : jours depuis next_status_update
     CASE
         WHEN deal_type = 'FULL'                THEN NULL
         WHEN contract_status = 'REPOSSESSED'   THEN NULL
@@ -185,12 +178,10 @@ SELECT
             )
         ELSE NULL
     END AS consecutive_locked_days,
-
     CURRENT_TIMESTAMP AS computed_at
-
 FROM normalized;
 
 COMMENT ON VIEW gold.unified_contracts IS
-'Vue unifiée TEVIA (UPYA) + GREENO (UPYA) + SURGE.
-Statuts normalisés cross-CRM : ENABLED, LOCKED, PAID_OFF, REPOSSESSED, CANCELLED.
-Source: silver.upya_contracts + silver.surge_contracts + silver.surge_payments + silver.surge_asset_mapping';
+'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v3.
+SURGE enrichi avec surge_product_lookup (total_contract_value, deal_type).
+remaining_debt SURGE calculé = total_contract_value - total_paid.';
