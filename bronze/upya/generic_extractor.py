@@ -61,12 +61,12 @@ ENDPOINTS = {
         "default_start": "2023-01-01",
     },
     "payments": {
-        "url":           "https://data.upya.io/data/search/payments",
-        "per_page":      500,
-        "incremental":   True,
-        "date_field":    "date",
-        "default_start": "2023-08-01",
-    },
+    "url":           "https://data.upya.io/data/search/payments",
+    "per_page":      500,
+    "incremental":   True,
+    "date_field":    "date",
+    "default_start": "2025-02-01",   # ← change de "2023-08-01"
+},
     "tasks": {
         "url":           "https://data.upya.io/data/search/tasks",
         "per_page":      500,
