@@ -1,12 +1,13 @@
+# ============================================================
 # silver/upya/payments_loader.py
 #
-# RÔLE : Lire les JSON Bronze (MinIO) → nettoyer → charger
-# dans PostgreSQL silver.upya_payments
+# RÔLE : Lire les JSON Bronze UPYA payments → nettoyer →
+# charger dans PostgreSQL silver.upya_payments
 #
-# FLUX :
-#   MinIO Bronze (bronze/upya/payments/2026/05/27/*.json)
-#       → [ce fichier]
-#       → PostgreSQL silver.upya_payments
+# v2 : Ajout colonne payment_code (DOWNPAYMENT_SUCCESS,
+#      PAYMENT_SUCCESS, etc.) indispensable pour le
+#      calcul du Collection Rate EFA
+# ============================================================
 
 import os
 import sys
@@ -15,7 +16,6 @@ import logging
 import time
 from datetime import datetime, timezone
 
-import psycopg2
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
@@ -29,53 +29,59 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# SCHÉMA SILVER — fixe et documenté
-# On choisit exactement les colonnes qu'on veut.
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS silver.upya_payments (
-    -- Identifiant unique de la transaction
-    transaction_id    TEXT PRIMARY KEY,
+    -- Identifiant unique
+    transaction_id      TEXT PRIMARY KEY,
 
-    -- Lien avec le contrat (clé de jointure)
-    contract_number   TEXT,
+    -- Lien avec le contrat
+    contract_number     TEXT,
 
-    -- Informations de paiement
-    payment_date      TIMESTAMPTZ,
-    amount            NUMERIC(18,2),
-    currency          TEXT,
-    status            TEXT,
+    -- Date et montant
+    payment_date        TIMESTAMPTZ,
+    amount              NUMERIC(18,2),
+    currency            TEXT,
 
-    -- Opérateur mobile money (MTN, Orange, etc.)
-    operator          TEXT,
-    payment_type      TEXT,
-    payment_reference TEXT,
-    mobile            TEXT,
+    -- Statut et classification
+    status              TEXT,
+    operator            TEXT,
+    payment_type        TEXT,
 
-    -- Entité (agence, point de vente)
-    entity_name       TEXT,
-    entity_number     TEXT,
+    -- Code de paiement — clé pour le Collection Rate EFA
+    -- DOWNPAYMENT_SUCCESS / INCOMPLETE_DOWNPAYMENT / FINAL_PAYMENT → upfront
+    -- PAYMENT_SUCCESS / INCOMPLETE_PAYMENT                          → recharge
+    -- REVERSED                                                      → à exclure
+    payment_code        TEXT,
 
-    -- Métadonnées pipeline
-    loaded_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    payment_reference   TEXT,
+    mobile              TEXT,
+
+    -- Entité (TEVIA / GREENO)
+    entity_name         TEXT,
+    entity_number       TEXT,
+
+    -- Méta pipeline
+    loaded_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_upya_payments_contract
     ON silver.upya_payments(contract_number);
-
 CREATE INDEX IF NOT EXISTS idx_upya_payments_date
     ON silver.upya_payments(payment_date);
-
 CREATE INDEX IF NOT EXISTS idx_upya_payments_status
     ON silver.upya_payments(status);
+CREATE INDEX IF NOT EXISTS idx_upya_payments_code
+    ON silver.upya_payments(payment_code);
 """
 
 UPSERT_SQL = """
 INSERT INTO silver.upya_payments (
     transaction_id, contract_number, payment_date,
     amount, currency, status, operator, payment_type,
-    payment_reference, mobile, entity_name, entity_number
+    payment_code, payment_reference, mobile,
+    entity_name, entity_number
 ) VALUES %s
 ON CONFLICT (transaction_id) DO UPDATE SET
     contract_number   = EXCLUDED.contract_number,
@@ -85,6 +91,7 @@ ON CONFLICT (transaction_id) DO UPDATE SET
     status            = EXCLUDED.status,
     operator          = EXCLUDED.operator,
     payment_type      = EXCLUDED.payment_type,
+    payment_code      = EXCLUDED.payment_code,
     payment_reference = EXCLUDED.payment_reference,
     mobile            = EXCLUDED.mobile,
     entity_name       = EXCLUDED.entity_name,
@@ -94,15 +101,7 @@ ON CONFLICT (transaction_id) DO UPDATE SET
 
 
 def parse_date(date_str):
-    """
-    Convertit une date ISO en datetime Python.
-    Retourne None si la date est invalide ou absente.
-
-    Pourquoi gérer None ?
-    → Les APIs retournent parfois des champs vides.
-      PostgreSQL accepte NULL mais pas une string vide
-      dans une colonne TIMESTAMPTZ.
-    """
+    """Convertit une date ISO en datetime UTC."""
     if not date_str:
         return None
     for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
@@ -114,15 +113,7 @@ def parse_date(date_str):
 
 
 def parse_amount(value):
-    """
-    Convertit un montant en float.
-    Retourne None si invalide.
-
-    Pourquoi ?
-    → L'API peut retourner "20,000" (string avec virgule)
-      ou 20000 (int) ou 20000.0 (float).
-      On normalise tout en float propre.
-    """
+    """Convertit un montant en float."""
     if value is None:
         return None
     try:
@@ -135,18 +126,12 @@ def parse_amount(value):
 
 def transform_payment(item):
     """
-    Transforme un dict JSON brut en tuple SQL.
+    Transforme un paiement JSON UPYA en tuple SQL.
 
-    C'est le coeur de la transformation Silver :
-    on mappe explicitement chaque champ JSON vers
-    sa colonne PostgreSQL avec le bon type.
-
-    Args:
-        item: dict JSON brut de l'API UPYA
-
-    Returns:
-        tuple: prêt pour l'insertion PostgreSQL
-        None : si l'item est invalide (pas de transaction_id)
+    Champs JSON UPYA disponibles :
+    transactionId, date, amount, ccy, contractNumber,
+    days, mobile, operator, paymentCode, paymentReference,
+    status, type, entity
     """
     transaction_id = item.get("transactionId")
     if not transaction_id:
@@ -163,6 +148,7 @@ def transform_payment(item):
         item.get("status"),
         item.get("operator"),
         item.get("type"),
+        item.get("paymentCode"),          # upfront vs recharge
         item.get("paymentReference"),
         item.get("mobile"),
         entity.get("name") if isinstance(entity, dict) else None,
@@ -171,31 +157,17 @@ def transform_payment(item):
 
 
 def load_payments(date=None):
-    """
-    Charge les paiements Bronze → Silver.
-
-    Séquence :
-    1. Liste les fichiers JSON dans MinIO Bronze
-    2. Pour chaque fichier → télécharge → transforme → upsert
-    3. Commit par batch de fichiers
-
-    Args:
-        date: "2026/05/27" pour charger un jour précis
-              None = dernier jour disponible
-    """
     load_dotenv()
     start_time = time.time()
 
     logger.info("=" * 50)
-    logger.info("SILVER LOADER — UPYA PAYMENTS")
+    logger.info("SILVER LOADER — UPYA PAYMENTS v2")
     logger.info("=" * 50)
 
-    # Connexions
     minio_client = get_minio_client()
     bucket       = os.getenv("MINIO_BUCKET", "paygo-lakehouse")
     conn         = get_db_connection()
 
-    # Création de la table Silver si elle n'existe pas
     init_schemas(conn)
     cur = conn.cursor()
     cur.execute(CREATE_TABLE_SQL)
@@ -203,63 +175,63 @@ def load_payments(date=None):
     cur.close()
     logger.info("Table silver.upya_payments prête")
 
-    # Liste les fichiers Bronze disponibles
     files = list_bronze_files(minio_client, bucket, "upya", "payments", date)
 
     if not files:
         logger.warning("Aucun fichier Bronze trouvé pour payments")
-        return
+        return 0
 
     logger.info(f"Fichiers à traiter : {len(files)}")
 
-    total_rows    = 0
-    total_errors  = 0
+    total_rows   = 0
+    total_errors = 0
 
     for file_key in files:
-        logger.info(f"Traitement : {file_key}")
-
         try:
-            # Télécharge le JSON depuis MinIO
             content = download_json(minio_client, bucket, file_key)
+            items   = json.loads(content)
 
-            # Parse le JSON — c'est une liste de paiements
-            items = json.loads(content)
-
-            # Transforme chaque paiement en tuple SQL
-            rows = []
-            for item in items:
-                row = transform_payment(item)
-                if row:
-                    rows.append(row)
-                else:
-                    total_errors += 1
+            rows = [r for r in (transform_payment(i) for i in items) if r]
 
             if not rows:
                 logger.warning(f"Aucune ligne valide dans {file_key}")
                 continue
 
-            # Upsert en batch
             cur = conn.cursor()
             execute_values(cur, UPSERT_SQL, rows, page_size=500)
             conn.commit()
             cur.close()
 
             total_rows += len(rows)
-            logger.info(f"  → {len(rows)} paiements chargés")
+            logger.info(f"  {file_key.split('/')[-1]} → {len(rows)} paiements")
 
         except Exception as e:
             conn.rollback()
             logger.error(f"Erreur sur {file_key} : {e}")
             total_errors += 1
 
+    # Stats par payment_code
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT payment_code, COUNT(*), SUM(amount)
+        FROM silver.upya_payments
+        WHERE status = 'ACCEPTED'
+        GROUP BY payment_code
+        ORDER BY COUNT(*) DESC
+    """)
+    logger.info("Répartition par payment_code :")
+    for row in cur.fetchall():
+        logger.info(f"  {str(row[0] or 'NULL'):30} : {row[1]:>8,} tx | {row[2] or 0:>15,.0f} XOF")
+    cur.close()
+
     duration = time.time() - start_time
 
     logger.info("=" * 50)
-    logger.info(f"✅ SILVER PAYMENTS TERMINÉ")
-    logger.info(f"   Fichiers  : {len(files)}")
-    logger.info(f"   Lignes    : {total_rows}")
-    logger.info(f"   Erreurs   : {total_errors}")
-    logger.info(f"   Durée     : {duration:.1f}s")
+    logger.info(f"✅ SILVER PAYMENTS v2 TERMINÉ")
+    logger.info(f"   Fichiers : {len(files)}")
+    logger.info(f"   Lignes   : {total_rows:,}")
+    logger.info(f"   Erreurs  : {total_errors}")
+    logger.info(f"   Durée    : {duration:.1f}s")
     logger.info("=" * 50)
 
     conn.close()
@@ -267,8 +239,5 @@ def load_payments(date=None):
 
 
 if __name__ == "__main__":
-    import sys
-    # Optionnel : passer une date en argument
-    # python payments_loader.py 2026/05/27
     date = sys.argv[1] if len(sys.argv) > 1 else None
     load_payments(date)
