@@ -1,20 +1,20 @@
+-- ============================================================
 -- gold/unified_contracts.sql
 -- VUE UNIFIÉE — Contrats UPYA (TEVIA + GREENO) + SURGE
 --
--- v5 : Correction registration_date UPYA
---      registration_date = deploy_date (depuis upya_assets)
---      paid_date         = signing_date (date de vente)
+-- v6 : Ajout repossession_date
+--      UPYA  → repossession_date depuis silver.upya_contracts
+--      SURGE → removed_at depuis silver.surge_contracts
+-- ============================================================
 
 CREATE OR REPLACE VIEW gold.unified_contracts AS
 
 WITH
 
--- Liste des contrats NEoT Capital
 neotci AS (
     SELECT contract_number FROM silver.surge_neotci_list
 ),
 
--- Calcul des montants SURGE depuis les transactions
 surge_financials AS (
     SELECT
         m.installation_id,
@@ -26,8 +26,6 @@ surge_financials AS (
     GROUP BY m.installation_id
 ),
 
--- Asset le plus récent par contrat UPYA
--- (un contrat peut avoir plusieurs assets dans le temps)
 upya_assets_latest AS (
     SELECT DISTINCT ON (contract_number)
         contract_number,
@@ -40,7 +38,6 @@ upya_assets_latest AS (
     ORDER BY contract_number, deploy_date DESC NULLS LAST
 ),
 
--- Contrats UPYA (TEVIA + GREENO)
 upya AS (
     SELECT
         c.contract_number,
@@ -54,15 +51,12 @@ upya AS (
         c.customer_name,
         c.agent_number,
         c.agent_name,
-        -- paid_date = date de signature/vente (acompte payé)
         c.signing_date                      AS paid_date,
-        -- registration_date = date d'activation terrain (déploiement)
         a.deploy_date                       AS registration_date,
         c.last_status_update,
         c.next_status_update,
         c.paid_off_date,
-        c.product_name,
-        -- asset_number depuis la table assets (plus fiable)
+        c.repossession_date,                -- ← UPYA
         COALESCE(a.payg_number, c.asset_number) AS asset_number,
         c.deal_type                         AS deal_type_raw,
         c.total_cost                        AS total_contract_value,
@@ -72,6 +66,7 @@ upya AS (
         c.remaining_debt,
         c.status                            AS contract_status_raw,
         c.paid_off_status                   AS paid_off_raw,
+        c.product_name,
         c.region,
         c.district                          AS sub_prefecture,
         c.village
@@ -83,7 +78,6 @@ upya AS (
       AND c.signing_date IS NOT NULL
 ),
 
--- Contrats SURGE enrichis
 surge AS (
     SELECT
         s.installation_id                   AS contract_number,
@@ -100,14 +94,12 @@ surge AS (
         s.customer_name,
         NULL::TEXT                          AS agent_number,
         s.installed_by                      AS agent_name,
-        -- paid_date = date de premier paiement (acompte)
         s.paid_at                           AS paid_date,
-        -- registration_date = date d'activation du contrat
         s.activated_at                      AS registration_date,
         s.paid_at                           AS last_status_update,
         s.unlocked_until                    AS next_status_update,
-        NULL::DATE                          AS paid_off_date,
-        COALESCE(pl.product_name, s.financial_type) AS product_name,
+        NULL::TIMESTAMPTZ                   AS paid_off_date,
+        s.removed_at::TIMESTAMPTZ           AS repossession_date, -- ← SURGE
         NULL::TEXT                          AS asset_number,
         COALESCE(pl.deal_type, 'PAYG')      AS deal_type_raw,
         pl.total_contract_value,
@@ -124,6 +116,7 @@ surge AS (
             WHEN s.removed_at IS NOT NULL THEN 'yes'
             ELSE 'no'
         END                                 AS paid_off_raw,
+        COALESCE(pl.product_name, s.financial_type) AS product_name,
         s.region,
         s.ward                              AS sub_prefecture,
         NULL::TEXT                          AS village
@@ -134,14 +127,12 @@ surge AS (
         ON pl.installation_id = s.installation_id::TEXT
 ),
 
--- Union des deux sources
 unified_raw AS (
     SELECT * FROM upya
     UNION ALL
     SELECT * FROM surge
 ),
 
--- Normalisation des statuts cross-CRM
 normalized AS (
     SELECT
         *,
@@ -165,7 +156,6 @@ normalized AS (
     FROM unified_raw
 )
 
--- SELECT FINAL
 SELECT
     contract_number,
     entite,
@@ -175,30 +165,25 @@ SELECT
     customer_name,
     agent_number,
     agent_name,
-    -- Dates
-    paid_date,              -- Date de vente / premier paiement
-    registration_date,      -- Date d'activation terrain
+    paid_date,
+    registration_date,
     last_status_update,
     next_status_update,
     paid_off_date,
-    -- Produit
+    repossession_date,
     product_name,
     asset_number,
     deal_type,
-    -- Financier
     total_contract_value,
     upfront_payment,
     monthly_payment,
     total_paid,
     remaining_debt,
-    -- Statut
     contract_status,
     paid_off,
-    -- Localisation
     region,
     sub_prefecture,
     village,
-    -- Jours de retard
     CASE
         WHEN deal_type = 'FULL'                THEN NULL
         WHEN contract_status = 'REPOSSESSED'   THEN NULL
@@ -219,9 +204,7 @@ SELECT
 FROM normalized;
 
 COMMENT ON VIEW gold.unified_contracts IS
-'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v5.
-paid_date         = date de vente/signature (signing_date UPYA, paid_at SURGE)
-registration_date = date activation terrain (deploy_date UPYA, activated_at SURGE)
-Source: silver.upya_contracts + silver.upya_assets + silver.surge_contracts
-      + silver.surge_payments + silver.surge_asset_mapping
-      + silver.surge_product_lookup + silver.surge_neotci_list';
+'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v6.
+repossession_date : upya_contracts.repossession_date / surge_contracts.removed_at
+paid_off_date     : upya_contracts.paid_off_date / surge via paid_off_contracts table
+registration_date : deploy_date UPYA / activated_at SURGE';
