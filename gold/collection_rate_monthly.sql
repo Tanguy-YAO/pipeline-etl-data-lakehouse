@@ -147,13 +147,13 @@ monthly_snapshots AS (
             ON uc.contract_number = s.contract_number
         WHERE s.snapshot_date <= md.month_end
           AND s.categorie IN ('upya_tevia', 'surge_tevia')
-          AND s.contract_status NOT IN ('REPOSSESSED', 'CANCELLED')
+          AND (s.contract_status IS NULL OR s.contract_status NOT IN ('REPOSSESSED', 'CANCELLED'))
         ORDER BY s.contract_number, s.snapshot_date DESC
     ) uc
     WHERE uc.registration_date IS NOT NULL
       AND uc.registration_date <= md.month_end
       AND COALESCE(uc.consecutive_locked_days, 0) <= 60
-      AND uc.contract_status NOT IN ('REPOSSESSED', 'CANCELLED')
+      AND (uc.contract_status IS NULL OR uc.contract_status NOT IN ('REPOSSESSED', 'CANCELLED'))
 ),
 
 -- ============================================================
@@ -221,7 +221,7 @@ expected_monthly AS (
             ) * ms.daily_rate
         END) AS expected_recharge
     FROM monthly_snapshots ms
-    WHERE ms.contract_status NOT IN ('REPOSSESSED', 'CANCELLED')
+    WHERE (ms.contract_status IS NULL OR ms.contract_status NOT IN ('REPOSSESSED', 'CANCELLED'))
     GROUP BY ms.month_start
 )
 
