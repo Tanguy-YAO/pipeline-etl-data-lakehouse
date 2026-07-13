@@ -17,4 +17,5 @@ Thumbs.db
 
 # Airflow
 airflow.db
-airflow.cfg
+airflow.cfgconfig/google_credentials.json
+.env
