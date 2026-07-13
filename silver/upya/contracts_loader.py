@@ -5,6 +5,8 @@
 # - Ajout repossession_date (depuis repossessionDate API)
 # - Indispensable pour le rapport EFA (nb_repossessions,
 #   nb_new_repossessions, repossession_rate)
+# CORRECTION v3.1 :
+# - Normalisation statuts en MAJUSCULES à l'insertion
 # ============================================================
 
 import os
@@ -155,10 +157,14 @@ def transform_contract(item):
         or ""
     )
 
+    # Normalisation statut en majuscules
+    raw_status = item.get("status")
+    status = raw_status.upper() if raw_status else None
+
     return (
         str(contract_number),
         entity.get("name"),
-        item.get("status"),
+        status,                                          # ← CORRIGÉ v3.1
         item.get("onboardingStatus"),
         item.get("flag"),
         str(paidoff_status),
@@ -168,7 +174,7 @@ def transform_contract(item):
         parse_date(item.get("lastStatusUpdate")),
         parse_date(item.get("nextStatusUpdate")),
         parse_date(item.get("paidOffDate") or item.get("paidoffDate")),
-        parse_date(item.get("repossessionDate")),   # ← NOUVEAU v3
+        parse_date(item.get("repossessionDate")),
         parse_amount(item.get("totalCost")),
         parse_amount(item.get("totalPaid")),
         parse_amount(item.get("remainingDebt")),
@@ -191,7 +197,7 @@ def load_contracts(date=None):
     start_time = time.time()
 
     logger.info("=" * 50)
-    logger.info("SILVER LOADER — UPYA CONTRACTS v3")
+    logger.info("SILVER LOADER — UPYA CONTRACTS v3.1")
     logger.info("=" * 50)
 
     minio_client = get_minio_client()
@@ -253,7 +259,7 @@ def load_contracts(date=None):
 
     duration = time.time() - start_time
     logger.info("=" * 50)
-    logger.info(f"✅ SILVER CONTRACTS v3 TERMINÉ")
+    logger.info(f"✅ SILVER CONTRACTS v3.1 TERMINÉ")
     logger.info(f"   Lignes   : {total_rows:,}")
     logger.info(f"   Erreurs  : {total_errors}")
     logger.info(f"   Durée    : {duration:.1f}s")
