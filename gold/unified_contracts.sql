@@ -2,19 +2,14 @@
 -- gold/unified_contracts.sql
 -- VUE UNIFIÉE — Contrats UPYA (TEVIA + GREENO) + SURGE
 --
--- v6 : Ajout repossession_date
---      UPYA  → repossession_date depuis silver.upya_contracts
---      SURGE → removed_at depuis silver.surge_contracts
+-- v7 : next_status_update SURGE = silver.surge_contracts.unlocked_until
+--      Source directe CRM SURGE export juillet 2026
 -- ============================================================
-
 CREATE OR REPLACE VIEW gold.unified_contracts AS
-
 WITH
-
 neotci AS (
     SELECT contract_number FROM silver.surge_neotci_list
 ),
-
 surge_financials AS (
     SELECT
         m.installation_id,
@@ -25,7 +20,6 @@ surge_financials AS (
     WHERE p.payment_status != 'REVERSED'
     GROUP BY m.installation_id
 ),
-
 upya_assets_latest AS (
     SELECT DISTINCT ON (contract_number)
         contract_number,
@@ -37,7 +31,6 @@ upya_assets_latest AS (
     WHERE contract_number IS NOT NULL
     ORDER BY contract_number, deploy_date DESC NULLS LAST
 ),
-
 upya AS (
     SELECT
         c.contract_number,
@@ -56,7 +49,7 @@ upya AS (
         c.last_status_update,
         c.next_status_update,
         c.paid_off_date,
-        c.repossession_date,                -- ← UPYA
+        c.repossession_date,
         COALESCE(a.payg_number, c.asset_number) AS asset_number,
         c.deal_type                         AS deal_type_raw,
         c.total_cost                        AS total_contract_value,
@@ -77,7 +70,6 @@ upya AS (
       AND TRIM(c.contract_number) != ''
       AND c.signing_date IS NOT NULL
 ),
-
 surge AS (
     SELECT
         s.installation_id                   AS contract_number,
@@ -97,9 +89,9 @@ surge AS (
         s.paid_at                           AS paid_date,
         s.activated_at                      AS registration_date,
         s.paid_at                           AS last_status_update,
-        s.unlocked_until                    AS next_status_update,
+        s.unlocked_until::TIMESTAMPTZ       AS next_status_update,
         NULL::TIMESTAMPTZ                   AS paid_off_date,
-        s.removed_at::TIMESTAMPTZ           AS repossession_date, -- ← SURGE
+        s.removed_at::TIMESTAMPTZ           AS repossession_date,
         NULL::TEXT                          AS asset_number,
         COALESCE(pl.deal_type, 'PAYG')      AS deal_type_raw,
         pl.total_contract_value,
@@ -126,20 +118,18 @@ surge AS (
     LEFT JOIN silver.surge_product_lookup pl
         ON pl.installation_id = s.installation_id::TEXT
 ),
-
 unified_raw AS (
     SELECT * FROM upya
     UNION ALL
     SELECT * FROM surge
 ),
-
 normalized AS (
     SELECT
         *,
         CASE
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('ACTIVE', 'ENABLED')          THEN 'ENABLED'
+            WHEN UPPER(TRIM(contract_status_raw)) IN ('ACTIVE', 'ENABLED', 'AWAITING REMOVAL')          THEN 'ENABLED'
             WHEN UPPER(TRIM(contract_status_raw)) IN ('DISABLED', 'REPOSSESSED')     THEN 'REPOSSESSED'
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('AWAITING REMOVAL', 'LOCKED')  THEN 'LOCKED'
+            WHEN UPPER(TRIM(contract_status_raw)) = 'LOCKED'  THEN 'LOCKED'
             WHEN UPPER(TRIM(contract_status_raw)) IN ('PAID_OFF', 'PAIDOFF')         THEN 'PAID_OFF'
             WHEN UPPER(TRIM(contract_status_raw)) = 'CANCELLED'                      THEN 'CANCELLED'
             ELSE UPPER(TRIM(contract_status_raw))
@@ -155,7 +145,6 @@ normalized AS (
         END AS deal_type
     FROM unified_raw
 )
-
 SELECT
     contract_number,
     entite,
@@ -202,9 +191,10 @@ SELECT
     END AS consecutive_locked_days,
     CURRENT_TIMESTAMP AS computed_at
 FROM normalized;
-
 COMMENT ON VIEW gold.unified_contracts IS
-'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v6.
+'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v7.
+next_status_update SURGE : silver.surge_contracts.unlocked_until (export CRM juillet 2026)
+next_status_update UPYA  : silver.upya_contracts.next_status_update
 repossession_date : upya_contracts.repossession_date / surge_contracts.removed_at
-paid_off_date     : upya_contracts.paid_off_date / surge via paid_off_contracts table
+paid_off_date     : upya_contracts.paid_off_date
 registration_date : deploy_date UPYA / activated_at SURGE';

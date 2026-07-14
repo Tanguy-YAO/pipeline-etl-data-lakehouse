@@ -166,7 +166,7 @@ SELECT
           AND retard_bucket NOT IN ('repossessed','paidoff','hors_portefeuille')
     )                                                    AS nb_default_90j_plus
 FROM bucketed b
-LEFT JOIN gold.collection_rate_monthly cr
+LEFT JOIN gold.collection_rate_v2 cr
     ON cr.month_end = b.month_end
 GROUP BY
     month_year, b.month_end, b.month_start,

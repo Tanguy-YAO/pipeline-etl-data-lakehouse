@@ -5,6 +5,7 @@
 -- CR = (paid_upfront + paid_recharge + paid_cash_sales)
 --      / (expected_upfront + expected_recharge + expected_cash_sales)
 -- expected_recharge = monthly_payment fixe (confirmé EDF)
+-- Seuil exclusion : CLD > 120j (write-off)
 -- ============================================================
 CREATE OR REPLACE VIEW gold.collection_rate_v2 AS
 WITH
@@ -15,9 +16,6 @@ monthly_dates AS (
             - INTERVAL '1 day')::date AS month_end
     FROM generate_series('2025-09-01'::date, CURRENT_DATE, INTERVAL '1 month') d
 ),
--- ============================================================
--- CONTRATS ACTIFS PAR MOIS
--- ============================================================
 monthly_contracts AS (
     SELECT DISTINCT ON (md.month_end, s.contract_number)
         md.month_start,
@@ -44,11 +42,9 @@ monthly_contracts AS (
       AND uc.registration_date <= md.month_end
       AND (uc.entite = 'TEVIA' OR uc.categorie = 'surge_tevia')
       AND (uc.paid_off_date IS NULL OR uc.paid_off_date > md.month_end)
+      AND COALESCE(s.consecutive_locked_days, 0) <= 120
     ORDER BY md.month_end, s.contract_number, s.snapshot_date DESC
 ),
--- ============================================================
--- EXPECTED PAR CONTRAT ET PAR MOIS
--- ============================================================
 expected_per_contract AS (
     SELECT
         mc.month_start,
@@ -59,36 +55,26 @@ expected_per_contract AS (
         mc.upfront_payment,
         mc.monthly_payment,
         mc.cld,
-
-        -- UPFRONT attendu le mois d'activation
         CASE
             WHEN mc.deal_type != 'FULL'
              AND DATE_TRUNC('month', mc.start_date) = mc.month_start
             THEN mc.upfront_payment
             ELSE 0
         END AS expected_upfront,
-
-        -- CASH SALES : contrats FULL activés ce mois
         CASE
             WHEN mc.deal_type = 'FULL'
              AND DATE_TRUNC('month', mc.start_date) = mc.month_start
             THEN mc.monthly_payment
             ELSE 0
         END AS expected_cash_sales,
-
-        -- RECHARGE : logique EDF — monthly_payment fixe
         CASE
-            WHEN mc.cld > 60                                          THEN 0
+            WHEN mc.cld > 120                                         THEN 0
             WHEN mc.deal_type = 'FULL'                                THEN 0
             WHEN DATE_TRUNC('month', mc.start_date) = mc.month_start THEN 0
             ELSE mc.monthly_payment
         END AS expected_recharge
-
     FROM monthly_contracts mc
 ),
--- ============================================================
--- AGRÉGATION MENSUELLE EXPECTED
--- ============================================================
 expected_monthly AS (
     SELECT
         month_start,
@@ -98,9 +84,6 @@ expected_monthly AS (
     FROM expected_per_contract
     GROUP BY month_start
 ),
--- ============================================================
--- PAIEMENTS UPYA
--- ============================================================
 upya_paid AS (
     SELECT
         DATE_TRUNC('month', p.payment_date)::date AS month_start,
@@ -119,9 +102,6 @@ upya_paid AS (
       AND (uc.entite = 'TEVIA' OR uc.categorie = 'surge_tevia')
     GROUP BY 1
 ),
--- ============================================================
--- PAIEMENTS SURGE
--- ============================================================
 surge_paid AS (
     SELECT
         DATE_TRUNC('month', p.paid_time)::date AS month_start,
@@ -135,9 +115,6 @@ surge_paid AS (
       AND uc.categorie = 'surge_tevia'
     GROUP BY 1
 ),
--- ============================================================
--- PAIEMENTS CASH SALES
--- ============================================================
 cash_paid AS (
     SELECT
         DATE_TRUNC('month', p.payment_date)::date AS month_start,
@@ -151,9 +128,6 @@ cash_paid AS (
       AND (uc.entite = 'TEVIA' OR uc.categorie = 'surge_tevia')
     GROUP BY 1
 ),
--- ============================================================
--- AGRÉGATION MENSUELLE PAIEMENTS
--- ============================================================
 paid_monthly AS (
     SELECT
         month_start,
@@ -169,9 +143,6 @@ paid_monthly AS (
     ) t
     GROUP BY month_start
 )
--- ============================================================
--- SELECT FINAL
--- ============================================================
 SELECT
     md.month_start,
     md.month_end,
