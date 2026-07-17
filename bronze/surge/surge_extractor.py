@@ -206,7 +206,14 @@ def process_surge_folder(
         return
 
     # 3. Prendre le plus récent (déjà trié par modifiedTime desc)
-    latest = csv_files[0]
+    # 3. Sélection du fichier
+    # Pour surge_contracts : filtrer sur surge_crm_contracts (source CRM officielle)
+    # Pour les autres dossiers : prendre le plus récent
+    if drive_folder_name == "surge_contracts":
+        crm_files = [f for f in csv_files if "surge_crm_contracts" in f["name"]]
+        latest = crm_files[0] if crm_files else csv_files[0]
+    else:
+        latest = csv_files[0]
     logger.info(
         f"Fichier sélectionné : {latest['name']} "
         f"(modifié : {latest['modifiedTime']})"
