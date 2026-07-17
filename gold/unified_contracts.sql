@@ -1,10 +1,15 @@
--- ============================================================
 -- gold/unified_contracts.sql
 -- VUE UNIFIÉE — Contrats UPYA (TEVIA + GREENO) + SURGE
 --
--- v7 : next_status_update SURGE = silver.surge_contracts.unlocked_until
---      Source directe CRM SURGE export juillet 2026
--- ============================================================
+-- v8 :
+--   - entite = TEVIA ou GREENO (entreprise propriétaire)
+--   - source = UPYA ou SURGE (origine technique)
+--   - categorie = upya_tevia / upya_greeno / surge_tevia /
+--                 surge_neotci / surge_zeci
+--   - paid_off SURGE depuis silver.surge_paidoff
+--   - total_paid SURGE depuis surge_financials (surge_payments)
+--   - CLD logique métier corrigée
+
 CREATE OR REPLACE VIEW gold.unified_contracts AS
 WITH
 neotci AS (
@@ -20,6 +25,11 @@ surge_financials AS (
     WHERE p.payment_status != 'REVERSED'
     GROUP BY m.installation_id
 ),
+-- paid_off SURGE depuis fichier Ownership_reached
+surge_paidoff_lookup AS (
+    SELECT contract_number, paid_off_date
+    FROM silver.surge_paidoff
+),
 upya_assets_latest AS (
     SELECT DISTINCT ON (contract_number)
         contract_number,
@@ -34,37 +44,39 @@ upya_assets_latest AS (
 upya AS (
     SELECT
         c.contract_number,
+        -- entite = entreprise propriétaire
         CASE
-            WHEN c.entity_name IN ('TEVIA', 'GREENO') THEN c.entity_name
+            WHEN c.entity_name = 'GREENO' THEN 'GREENO'
             ELSE 'TEVIA'
-        END                                 AS entite,
-        'UPYA'                              AS source,
+        END                                     AS entite,
+        'UPYA'                                  AS source,
+        -- categorie = sous-type précis
         CASE
             WHEN c.entity_name = 'GREENO' THEN 'upya_greeno'
             ELSE 'upya_tevia'
-        END                                 AS categorie,
+        END                                     AS categorie,
         c.client_number,
         c.customer_name,
         c.agent_number,
         c.agent_name,
-        c.signing_date                      AS paid_date,
-        a.deploy_date                       AS registration_date,
+        c.signing_date                          AS paid_date,
+        a.deploy_date                           AS registration_date,
         c.last_status_update,
         c.next_status_update,
         c.paid_off_date,
         c.repossession_date,
         COALESCE(a.payg_number, c.asset_number) AS asset_number,
-        c.deal_type                         AS deal_type_raw,
-        c.total_cost                        AS total_contract_value,
+        c.deal_type                             AS deal_type_raw,
+        c.total_cost                            AS total_contract_value,
         c.upfront_payment,
         c.monthly_payment,
         c.total_paid,
         c.remaining_debt,
-        c.status                            AS contract_status_raw,
-        c.paid_off_status                   AS paid_off_raw,
+        c.status                                AS contract_status_raw,
+        c.paid_off_status                       AS paid_off_raw,
         c.product_name,
         c.region,
-        c.district                          AS sub_prefecture,
+        c.district                              AS sub_prefecture,
         c.village
     FROM silver.upya_contracts c
     LEFT JOIN upya_assets_latest a
@@ -75,51 +87,58 @@ upya AS (
 ),
 surge AS (
     SELECT
-        s.installation_id                   AS contract_number,
-        'TEVIA'                             AS entite,
-        'SURGE'                             AS source,
+        s.installation_id::TEXT                 AS contract_number,
+        -- entite = entreprise propriétaire (SURGE = TEVIA uniquement)
+        'TEVIA'                                 AS entite,
+        'SURGE'                                 AS source,
+        -- categorie = sous-type précis
         CASE
             WHEN s.installation_id::TEXT IN (SELECT contract_number FROM neotci)
                 THEN 'surge_neotci'
             WHEN s.paid_at >= '2024-04-01'
                 THEN 'surge_tevia'
             ELSE 'surge_zeci'
-        END                                 AS categorie,
-        s.customer_id                       AS client_number,
+        END                                     AS categorie,
+        s.customer_id                           AS client_number,
         s.customer_name,
-        NULL::TEXT                          AS agent_number,
-        s.installed_by                      AS agent_name,
-        s.paid_at                           AS paid_date,
-        s.activated_at                      AS registration_date,
-        s.paid_at                           AS last_status_update,
-        s.unlocked_until::TIMESTAMPTZ       AS next_status_update,
-        NULL::TIMESTAMPTZ                   AS paid_off_date,
-        s.removed_at::TIMESTAMPTZ           AS repossession_date,
-        NULL::TEXT                          AS asset_number,
-        COALESCE(pl.deal_type, 'PAYG')      AS deal_type_raw,
+        NULL::TEXT                              AS agent_number,
+        s.installed_by                          AS agent_name,
+        s.paid_at                               AS paid_date,
+        s.activated_at                          AS registration_date,
+        s.paid_at                               AS last_status_update,
+        s.unlocked_until::TIMESTAMPTZ           AS next_status_update,
+        -- paid_off_date depuis silver.surge_paidoff (Ownership_reached)
+        sp.paid_off_date::TIMESTAMPTZ           AS paid_off_date,
+        s.removed_at::TIMESTAMPTZ               AS repossession_date,
+        NULL::TEXT                              AS asset_number,
+        COALESCE(pl.deal_type, 'PAYG')          AS deal_type_raw,
         pl.total_contract_value,
         pl.upfront_payment,
         pl.monthly_payment,
-        COALESCE(sf.total_paid, 0)          AS total_paid,
+        COALESCE(sf.total_paid, 0)              AS total_paid,
         CASE
             WHEN pl.total_contract_value IS NOT NULL
-            THEN GREATEST(0, pl.total_contract_value - COALESCE(sf.total_paid, 0))
+            THEN GREATEST(0, pl.total_contract_value
+                 - COALESCE(sf.total_paid, 0))
             ELSE NULL
-        END                                 AS remaining_debt,
-        s.status                            AS contract_status_raw,
+        END                                     AS remaining_debt,
+        s.status                                AS contract_status_raw,
+        -- paid_off_raw depuis surge_paidoff uniquement
         CASE
-            WHEN s.removed_at IS NOT NULL THEN 'yes'
+            WHEN sp.paid_off_date IS NOT NULL THEN 'yes'
             ELSE 'no'
-        END                                 AS paid_off_raw,
+        END                                     AS paid_off_raw,
         COALESCE(pl.product_name, s.financial_type) AS product_name,
         s.region,
-        s.ward                              AS sub_prefecture,
-        NULL::TEXT                          AS village
+        s.ward                                  AS sub_prefecture,
+        NULL::TEXT                              AS village
     FROM silver.surge_contracts s
     LEFT JOIN surge_financials sf
         ON sf.installation_id = s.installation_id
     LEFT JOIN silver.surge_product_lookup pl
         ON pl.installation_id = s.installation_id::TEXT
+    LEFT JOIN surge_paidoff_lookup sp
+        ON sp.contract_number = s.installation_id::TEXT
 ),
 unified_raw AS (
     SELECT * FROM upya
@@ -129,12 +148,20 @@ unified_raw AS (
 normalized AS (
     SELECT
         *,
+        -- APRÈS
         CASE
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('ACTIVE', 'ENABLED', 'AWAITING REMOVAL')          THEN 'ENABLED'
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('DISABLED', 'REPOSSESSED')     THEN 'REPOSSESSED'
-            WHEN UPPER(TRIM(contract_status_raw)) = 'LOCKED'  THEN 'LOCKED'
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('PAID_OFF', 'PAIDOFF')         THEN 'PAID_OFF'
-            WHEN UPPER(TRIM(contract_status_raw)) = 'CANCELLED'                      THEN 'CANCELLED'
+            WHEN paid_off_date IS NOT NULL AND source = 'SURGE'
+                THEN 'PAID_OFF'
+            WHEN UPPER(TRIM(contract_status_raw)) IN ('ACTIVE', 'ENABLED', 'AWAITING REMOVAL')
+                THEN 'ENABLED'
+            WHEN UPPER(TRIM(contract_status_raw)) IN ('DISABLED', 'REPOSSESSED')
+                THEN 'REPOSSESSED'
+            WHEN UPPER(TRIM(contract_status_raw)) = 'LOCKED'
+                THEN 'LOCKED'
+            WHEN UPPER(TRIM(contract_status_raw)) IN ('PAID_OFF', 'PAIDOFF')
+                THEN 'PAID_OFF'
+            WHEN UPPER(TRIM(contract_status_raw)) = 'CANCELLED'
+                THEN 'CANCELLED'
             ELSE UPPER(TRIM(contract_status_raw))
         END AS contract_status,
         CASE
@@ -176,11 +203,14 @@ SELECT
     region,
     sub_prefecture,
     village,
+    -- CLD logique métier :
+    -- NULL si FULL, REPOSSESSED, CANCELLED, ou paid_off
+    -- Calculé depuis next_status_update sinon
     CASE
-        WHEN deal_type = 'FULL'                THEN NULL
-        WHEN contract_status = 'REPOSSESSED'   THEN NULL
-        WHEN contract_status = 'CANCELLED'     THEN NULL
-        WHEN paid_off = 'true'                 THEN NULL
+        WHEN deal_type = 'FULL'                 THEN NULL
+        WHEN contract_status = 'REPOSSESSED'    THEN NULL
+        WHEN contract_status = 'CANCELLED'      THEN NULL
+        WHEN paid_off = 'true'                  THEN NULL
         WHEN next_status_update IS NOT NULL THEN
             GREATEST(0,
                 FLOOR(
@@ -194,10 +224,12 @@ SELECT
     END AS consecutive_locked_days,
     CURRENT_TIMESTAMP AS computed_at
 FROM normalized;
+
 COMMENT ON VIEW gold.unified_contracts IS
-'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v7.
-next_status_update SURGE : silver.surge_contracts.unlocked_until (export CRM juillet 2026)
-next_status_update UPYA  : silver.upya_contracts.next_status_update
-repossession_date : upya_contracts.repossession_date / surge_contracts.removed_at
-paid_off_date     : upya_contracts.paid_off_date
-registration_date : deploy_date UPYA / activated_at SURGE';
+'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v8.
+entite       : TEVIA ou GREENO (entreprise propriétaire)
+source       : UPYA ou SURGE (origine technique)
+categorie    : upya_tevia / upya_greeno / surge_tevia / surge_neotci / surge_zeci
+paid_off     : surge_paidoff (Ownership_reached) pour SURGE / upya_contracts pour UPYA
+repossession : upya_contracts.repossession_date / surge_contracts.removed_at
+registration : deploy_date UPYA / activated_at SURGE';
