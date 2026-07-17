@@ -39,7 +39,10 @@ upya AS (
             ELSE 'TEVIA'
         END                                 AS entite,
         'UPYA'                              AS source,
-        'upya_tevia'                        AS categorie,
+        CASE
+            WHEN c.entity_name = 'GREENO' THEN 'upya_greeno'
+            ELSE 'upya_tevia'
+        END                                 AS categorie,
         c.client_number,
         c.customer_name,
         c.agent_number,
@@ -73,7 +76,7 @@ upya AS (
 surge AS (
     SELECT
         s.installation_id                   AS contract_number,
-        'SURGE'                             AS entite,
+        'TEVIA'                             AS entite,
         'SURGE'                             AS source,
         CASE
             WHEN s.installation_id::TEXT IN (SELECT contract_number FROM neotci)
