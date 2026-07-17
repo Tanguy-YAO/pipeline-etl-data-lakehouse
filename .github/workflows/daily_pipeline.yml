@@ -3,7 +3,6 @@
 #
 # Horaire : 06h00 UTC (= 06h00 Abidjan, UTC+0)
 # Tâches  : Extraction UPYA → Silver → Snapshot Gold
-
 name: Pipeline Quotidien TEVIA & GREENO
 
 on:
@@ -19,10 +18,12 @@ jobs:
 
     steps:
       # --------------------------------------------------------
-      # 1. Checkout du repo
+      # 1. Checkout du repo — branche master (projet TEVIA)
       # --------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: master
 
       # --------------------------------------------------------
       # 2. Setup Python
@@ -50,9 +51,13 @@ jobs:
           DB_USER=${{ secrets.DB_USER }}
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
           MINIO_ENDPOINT=${{ secrets.MINIO_ENDPOINT }}
+          MINIO_PORT=${{ secrets.MINIO_PORT }}
+          MINIO_USE_SSL=${{ secrets.MINIO_USE_SSL }}
           MINIO_ACCESS_KEY=${{ secrets.MINIO_ACCESS_KEY }}
           MINIO_SECRET_KEY=${{ secrets.MINIO_SECRET_KEY }}
           MINIO_BUCKET=${{ secrets.MINIO_BUCKET }}
+          UPYA_USERNAME=${{ secrets.UPYA_USERNAME }}
+          UPYA_PASSWORD=${{ secrets.UPYA_PASSWORD }}
           SURGE_DRIVE_FOLDER=${{ secrets.SURGE_DRIVE_FOLDER }}
           GOOGLE_CREDENTIALS_PATH=config/google_credentials.json
           EOF
