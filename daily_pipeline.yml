@@ -1,0 +1,110 @@
+# .github/workflows/daily_pipeline.yml
+# Pipeline quotidien TEVIA ENERGIE & GREENO
+#
+# Horaire : 06h00 UTC (= 06h00 Abidjan, UTC+0)
+# Tâches  : Extraction UPYA → Silver → Snapshot Gold
+
+name: Pipeline Quotidien TEVIA & GREENO
+
+on:
+  schedule:
+    - cron: '0 6 * * 1-6'  # Lun-Sam à 06h00 UTC
+  workflow_dispatch:         # Déclenchement manuel possible
+
+jobs:
+  pipeline:
+    name: ETL Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # --------------------------------------------------------
+      # 1. Checkout du repo
+      # --------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------------
+      # 2. Setup Python
+      # --------------------------------------------------------
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # --------------------------------------------------------
+      # 3. Installation des dépendances
+      # --------------------------------------------------------
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # --------------------------------------------------------
+      # 4. Créer fichiers de config depuis secrets GitHub
+      # --------------------------------------------------------
+      - name: Create .env file
+        run: |
+          cat > .env << EOF
+          DB_HOST=${{ secrets.DB_HOST }}
+          DB_PORT=${{ secrets.DB_PORT }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          MINIO_ENDPOINT=${{ secrets.MINIO_ENDPOINT }}
+          MINIO_ACCESS_KEY=${{ secrets.MINIO_ACCESS_KEY }}
+          MINIO_SECRET_KEY=${{ secrets.MINIO_SECRET_KEY }}
+          MINIO_BUCKET=${{ secrets.MINIO_BUCKET }}
+          SURGE_DRIVE_FOLDER=${{ secrets.SURGE_DRIVE_FOLDER }}
+          GOOGLE_CREDENTIALS_PATH=config/google_credentials.json
+          EOF
+
+      - name: Create Google credentials file
+        run: |
+          mkdir -p config
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > config/google_credentials.json
+
+      # --------------------------------------------------------
+      # 5. Extraction Bronze UPYA
+      # --------------------------------------------------------
+      - name: Bronze - Extraction contracts UPYA
+        run: python bronze/upya/generic_extractor.py contracts
+
+      - name: Bronze - Extraction payments UPYA
+        run: python bronze/upya/generic_extractor.py payments
+
+      - name: Bronze - Extraction assets UPYA
+        run: python bronze/upya/generic_extractor.py assets
+
+      # --------------------------------------------------------
+      # 6. Chargement Silver UPYA
+      # --------------------------------------------------------
+      - name: Silver - Chargement contracts UPYA
+        run: python silver/upya/contracts_loader.py
+
+      - name: Silver - Chargement payments UPYA
+        run: python silver/upya/payments_loader.py
+
+      - name: Silver - Chargement assets UPYA
+        run: python silver/upya/generic_loader.py assets
+
+      # --------------------------------------------------------
+      # 7. Snapshot Gold quotidien
+      # --------------------------------------------------------
+      - name: Gold - Snapshot quotidien
+        run: python gold/snapshot_builder.py
+
+      # --------------------------------------------------------
+      # 8. Notification succès
+      # --------------------------------------------------------
+      - name: Notification succès
+        if: success()
+        run: |
+          echo "✅ Pipeline $(date '+%Y-%m-%d') terminé avec succès"
+
+      # --------------------------------------------------------
+      # 9. Notification échec
+      # --------------------------------------------------------
+      - name: Notification échec
+        if: failure()
+        run: |
+          echo "❌ Pipeline $(date '+%Y-%m-%d') a échoué — vérifier les logs GitHub Actions"
