@@ -2,7 +2,7 @@
 # Pipeline quotidien TEVIA ENERGIE & GREENO
 #
 # Horaire : 06h00 UTC (= 06h00 Abidjan, UTC+0)
-# Tâches  : Extraction UPYA → Silver → Snapshot Gold
+# Taches  : Extraction UPYA -> Silver -> Snapshot Gold
 name: Pipeline Quotidien TEVIA & GREENO
 
 on:
