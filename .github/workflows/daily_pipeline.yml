@@ -1,14 +1,9 @@
-# .github/workflows/daily_pipeline.yml
-# Pipeline quotidien TEVIA ENERGIE & GREENO
-#
-# Horaire : 06h00 UTC (= 06h00 Abidjan, UTC+0)
-# Taches  : Extraction UPYA -> Silver -> Snapshot Gold
 name: Pipeline Quotidien TEVIA & GREENO
 
 on:
   schedule:
-    - cron: '0 6 * * 1-6'  # Lun-Sam à 06h00 UTC
-  workflow_dispatch:         # Déclenchement manuel possible
+    - cron: '0 6 * * 1-6'
+  workflow_dispatch:
 
 jobs:
   pipeline:
@@ -17,32 +12,20 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # --------------------------------------------------------
-      # 1. Checkout du repo — branche master (projet TEVIA)
-      # --------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           ref: master
 
-      # --------------------------------------------------------
-      # 2. Setup Python
-      # --------------------------------------------------------
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # --------------------------------------------------------
-      # 3. Installation des dépendances
-      # --------------------------------------------------------
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # --------------------------------------------------------
-      # 4. Créer fichiers de config depuis secrets GitHub
-      # --------------------------------------------------------
-- name: Create .env file
+      - name: Create .env file
         run: |
           echo "DB_HOST=${{ secrets.DB_HOST }}" >> .env
           echo "DB_PORT=${{ secrets.DB_PORT }}" >> .env
@@ -65,9 +48,9 @@ jobs:
           mkdir -p config
           echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > config/google_credentials.json
 
-      # --------------------------------------------------------
-      # 5. Extraction Bronze UPYA
-      # --------------------------------------------------------
+      - name: Debug .env
+        run: cat .env
+
       - name: Bronze - Extraction contracts UPYA
         run: python bronze/upya/generic_extractor.py contracts
 
@@ -77,9 +60,6 @@ jobs:
       - name: Bronze - Extraction assets UPYA
         run: python bronze/upya/generic_extractor.py assets
 
-      # --------------------------------------------------------
-      # 6. Chargement Silver UPYA
-      # --------------------------------------------------------
       - name: Silver - Chargement contracts UPYA
         run: python silver/upya/contracts_loader.py
 
@@ -89,24 +69,14 @@ jobs:
       - name: Silver - Chargement assets UPYA
         run: python silver/upya/generic_loader.py assets
 
-      # --------------------------------------------------------
-      # 7. Snapshot Gold quotidien
-      # --------------------------------------------------------
       - name: Gold - Snapshot quotidien
         run: python gold/snapshot_builder.py
 
-      # --------------------------------------------------------
-      # 8. Notification succès
-      # --------------------------------------------------------
-      - name: Notification succès
-        if: success()
+      - name: Statut pipeline
+        if: always()
         run: |
-          echo "✅ Pipeline $(date '+%Y-%m-%d') terminé avec succès"
-
-      # --------------------------------------------------------
-      # 9. Notification échec
-      # --------------------------------------------------------
-      - name: Notification échec
-        if: failure()
-        run: |
-          echo "❌ Pipeline $(date '+%Y-%m-%d') a échoué — vérifier les logs GitHub Actions"
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "Pipeline termine avec succes"
+          else
+            echo "Pipeline a echoue - verifier les logs"
+          fi
