@@ -1,4 +1,3 @@
--- ============================================================
 -- gold/collection_rate_v2.sql
 -- Collection Rate v2 — Aligné définition EDF
 -- Formule :
@@ -6,7 +5,6 @@
 --      / (expected_upfront + expected_recharge + expected_cash_sales)
 -- expected_recharge = monthly_payment fixe (confirmé EDF)
 -- Seuil exclusion : CLD > 120j (write-off)
--- ============================================================
 CREATE OR REPLACE VIEW gold.collection_rate_v2 AS
 WITH
 monthly_dates AS (
