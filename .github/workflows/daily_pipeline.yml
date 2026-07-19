@@ -69,6 +69,13 @@ jobs:
       - name: Silver - Chargement assets UPYA
         run: python silver/upya/generic_loader.py assets
 
+      - name: Silver - Chargement tasks UPYA
+        run: python silver/upya/tasks_loader.py
+
+      - name: Silver - Chargement forms UPYA
+        run: python silver/upya/forms_loader.py
+
+
       - name: Gold - Snapshot quotidien
         run: python gold/snapshot_builder.py
 
