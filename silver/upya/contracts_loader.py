@@ -1,5 +1,4 @@
-# ============================================================
-# silver/upya/contracts_loader.py v3
+# silver/upya/contracts_loader.py v3.2
 #
 # NOUVEAUTÉS v3 :
 # - Ajout repossession_date (depuis repossessionDate API)
@@ -7,7 +6,9 @@
 #   nb_new_repossessions, repossession_rate)
 # CORRECTION v3.1 :
 # - Normalisation statuts en MAJUSCULES à l'insertion
-# ============================================================
+# CORRECTION v3.2 :
+# - Ajout sub_prefecture depuis profile.commune (UPYA API)
+# - district conservé séparément
 
 import os
 import sys
@@ -57,6 +58,7 @@ CREATE TABLE IF NOT EXISTS silver.upya_contracts (
     agent_number        TEXT,
     agent_name          TEXT,
     region              TEXT,
+    sub_prefecture      TEXT,
     district            TEXT,
     village             TEXT,
     loaded_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -81,7 +83,7 @@ INSERT INTO silver.upya_contracts (
     product_name, asset_number,
     client_number, customer_name,
     agent_number, agent_name,
-    region, district, village
+    region, sub_prefecture, district, village
 ) VALUES %s
 ON CONFLICT (contract_number) DO UPDATE SET
     entity_name        = EXCLUDED.entity_name,
@@ -100,6 +102,9 @@ ON CONFLICT (contract_number) DO UPDATE SET
     remaining_debt     = EXCLUDED.remaining_debt,
     upfront_payment    = EXCLUDED.upfront_payment,
     monthly_payment    = EXCLUDED.monthly_payment,
+    sub_prefecture     = EXCLUDED.sub_prefecture,
+    district           = EXCLUDED.district,
+    village            = EXCLUDED.village,
     updated_at         = NOW();
 """
 
@@ -134,7 +139,6 @@ def transform_contract(item):
     if not contract_number:
         return None
 
-    # Filtrer contrats test
     client  = item.get("client")  or {}
     profile = client.get("profile") or {}
     first   = profile.get("firstName", "") or ""
@@ -157,14 +161,13 @@ def transform_contract(item):
         or ""
     )
 
-    # Normalisation statut en majuscules
     raw_status = item.get("status")
     status = raw_status.upper() if raw_status else None
 
     return (
         str(contract_number),
         entity.get("name"),
-        status,                                          # ← CORRIGÉ v3.1
+        status,
         item.get("onboardingStatus"),
         item.get("flag"),
         str(paidoff_status),
@@ -187,7 +190,8 @@ def transform_contract(item):
         agent.get("agentNumber"),
         concat_name(ag_prof.get("firstName"), ag_prof.get("lastName")),
         profile.get("region"),
-        profile.get("district"),
+        profile.get("commune"),      # ← sous-préfecture réelle UPYA
+        profile.get("district"),     # ← district administratif UPYA
         profile.get("village"),
     )
 
@@ -197,7 +201,7 @@ def load_contracts(date=None):
     start_time = time.time()
 
     logger.info("=" * 50)
-    logger.info("SILVER LOADER — UPYA CONTRACTS v3.1")
+    logger.info("SILVER LOADER — UPYA CONTRACTS v3.2")
     logger.info("=" * 50)
 
     minio_client = get_minio_client()
@@ -206,6 +210,15 @@ def load_contracts(date=None):
 
     init_schemas(conn)
     cur = conn.cursor()
+
+    # Ajouter colonnes si absentes (migration safe)
+    cur.execute("""
+        ALTER TABLE IF EXISTS silver.upya_contracts
+        ADD COLUMN IF NOT EXISTS sub_prefecture TEXT,
+        ADD COLUMN IF NOT EXISTS district       TEXT
+    """)
+    conn.commit()
+
     cur.execute(CREATE_TABLE_SQL)
     conn.commit()
     cur.close()
@@ -241,11 +254,11 @@ def load_contracts(date=None):
             logger.error(f"Erreur {file_key} : {e}")
             total_errors += 1
 
-    # Stats par entité
     cur = conn.cursor()
     cur.execute("""
         SELECT entity_name, COUNT(*),
-               COUNT(repossession_date) as avec_repossession_date
+               COUNT(repossession_date) AS avec_repossession_date,
+               COUNT(sub_prefecture)   AS avec_sub_prefecture
         FROM silver.upya_contracts
         GROUP BY entity_name ORDER BY COUNT(*) DESC
     """)
@@ -253,13 +266,14 @@ def load_contracts(date=None):
     for row in cur.fetchall():
         logger.info(
             f"  {row[0] or 'NULL':10} : {row[1]:,} contrats "
-            f"| {row[2]:,} avec repossession_date"
+            f"| {row[2]:,} repossessions "
+            f"| {row[3]:,} avec sub_prefecture"
         )
     cur.close()
 
     duration = time.time() - start_time
     logger.info("=" * 50)
-    logger.info(f"✅ SILVER CONTRACTS v3.1 TERMINÉ")
+    logger.info(f"✅ SILVER CONTRACTS v3.2 TERMINÉ")
     logger.info(f"   Lignes   : {total_rows:,}")
     logger.info(f"   Erreurs  : {total_errors}")
     logger.info(f"   Durée    : {duration:.1f}s")
