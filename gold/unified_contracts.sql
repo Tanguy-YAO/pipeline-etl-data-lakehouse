@@ -3,7 +3,7 @@
 --
 -- v8 :
 --   - entite = TEVIA ou GREENO (entreprise propriétaire)
---   - source = UPYA ou SURGE (origine technique)
+--   - source = UPYA ou SURGE (CRM - origine technique)
 --   - categorie = upya_tevia / upya_greeno / surge_tevia /
 --                 surge_neotci / surge_zeci
 --   - paid_off SURGE depuis silver.surge_paidoff
@@ -16,14 +16,32 @@ neotci AS (
     SELECT contract_number FROM silver.surge_neotci_list
 ),
 surge_financials AS (
+    -- Source 1 : surge_payments (transactions mobile money)
     SELECT
-        m.installation_id,
-        SUM(p.amount)    AS total_paid,
-        MAX(p.paid_time) AS last_payment_date
+        m.installation_id::text      AS installation_id,
+        SUM(p.amount)                AS total_paid,
+        MAX(p.paid_time)             AS last_payment_date
     FROM silver.surge_payments p
     JOIN silver.surge_asset_mapping m ON p.account = m.asset_number
     WHERE p.payment_status != 'REVERSED'
-    GROUP BY m.installation_id
+    GROUP BY m.installation_id::text
+
+    UNION ALL
+
+    -- Source 2 : surge_lease_engine (anciens contrats ZOLA)
+    -- Uniquement les contrats absents de surge_payments
+    SELECT
+        le.installation_id::text     AS installation_id,
+        SUM(le.total_cash_collected) AS total_paid,
+        MAX(le.posting_date)         AS last_payment_date
+    FROM silver.surge_lease_engine le
+    WHERE le.installation_id::text NOT IN (
+        SELECT DISTINCT m.installation_id::text
+        FROM silver.surge_payments p
+        JOIN silver.surge_asset_mapping m ON p.account = m.asset_number
+        WHERE p.payment_status != 'REVERSED'
+    )
+    GROUP BY le.installation_id::text
 ),
 -- paid_off SURGE depuis fichier Ownership_reached
 surge_paidoff_lookup AS (

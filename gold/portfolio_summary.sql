@@ -1,7 +1,5 @@
--- ============================================================
 -- gold/portfolio_summary.sql
 -- KPIs clés du portefeuille TEVIA — vue quotidienne
--- ============================================================
 CREATE OR REPLACE VIEW gold.portfolio_summary AS
 SELECT
     CURRENT_DATE AS report_date,
@@ -12,7 +10,7 @@ SELECT
     ROUND(SUM(uc.total_contract_value) FILTER (WHERE uc.contract_status = 'ENABLED' AND (uc.entite = 'TEVIA' OR uc.categorie = 'surge_tevia') AND COALESCE(uc.consecutive_locked_days, 0) <= 120) / 655.957, 0) AS valeur_portefeuille_eur,
     ROUND(SUM(uc.remaining_debt) FILTER (WHERE uc.contract_status = 'ENABLED' AND (uc.entite = 'TEVIA' OR uc.categorie = 'surge_tevia') AND COALESCE(uc.consecutive_locked_days, 0) <= 120) / 655.957, 0) AS receivables_eur,
     ROUND(SUM(uc.total_paid) FILTER (WHERE (uc.entite = 'TEVIA' OR uc.categorie = 'surge_tevia')) / 655.957, 0) AS total_collected_eur,
-    ROUND(AVG(pvp.pvp_linearized) FILTER (WHERE pvp.pvp_linearized < 2 AND pvp.days_on_books > 0 AND pvp.entite = 'TEVIA'), 4) AS pvp_moyen,
+    ROUND(AVG(pvp.pvp_linearized) FILTER (WHERE pvp.pvp_linearized < 2 AND pvp.days_on_books > 0 AND pvp.categorie IN ('upya_tevia', 'surge_tevia')), 4) AS pvp_moyen,
     COUNT(*) FILTER (WHERE uc.consecutive_locked_days = 0 AND uc.contract_status = 'ENABLED' AND (uc.entite = 'TEVIA' OR uc.categorie = 'surge_tevia')) AS nb_cld_0,
     COUNT(*) FILTER (WHERE uc.consecutive_locked_days BETWEEN 1 AND 30 AND (uc.entite = 'TEVIA' OR uc.categorie = 'surge_tevia')) AS nb_par_1_30j,
     COUNT(*) FILTER (WHERE uc.consecutive_locked_days BETWEEN 31 AND 60 AND (uc.entite = 'TEVIA' OR uc.categorie = 'surge_tevia')) AS nb_par_31_60j,
