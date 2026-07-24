@@ -52,12 +52,14 @@ upya_assets_latest AS (
     SELECT DISTINCT ON (contract_number)
         contract_number,
         payg_number,
-        deploy_date,
+        COALESCE(deploy_date, date_added) AS deploy_date,
         serial_number,
         status AS asset_status
     FROM silver.upya_assets
     WHERE contract_number IS NOT NULL
-    ORDER BY contract_number, deploy_date DESC NULLS LAST
+      AND status = 'DEPLOYED'
+    ORDER BY contract_number,
+             COALESCE(deploy_date, date_added) DESC NULLS LAST
 ),
 upya AS (
     SELECT
