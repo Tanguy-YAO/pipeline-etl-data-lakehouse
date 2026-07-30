@@ -1,4 +1,4 @@
-# silver/upya/contracts_loader.py v3.2
+# silver/upya/contracts_loader.py v3.3
 #
 # NOUVEAUTÉS v3 :
 # - Ajout repossession_date (depuis repossessionDate API)
@@ -9,6 +9,8 @@
 # CORRECTION v3.2 :
 # - Ajout sub_prefecture depuis profile.commune (UPYA API)
 # - district conservé séparément
+# CORRECTION v3.3 :
+# - Ajout latitude et longitude depuis profile.gps (UPYA API)
 
 import os
 import sys
@@ -61,6 +63,8 @@ CREATE TABLE IF NOT EXISTS silver.upya_contracts (
     sub_prefecture      TEXT,
     district            TEXT,
     village             TEXT,
+    latitude            DOUBLE PRECISION,
+    longitude           DOUBLE PRECISION,
     loaded_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -83,7 +87,8 @@ INSERT INTO silver.upya_contracts (
     product_name, asset_number,
     client_number, customer_name,
     agent_number, agent_name,
-    region, sub_prefecture, district, village
+    region, sub_prefecture, district, village,
+    latitude, longitude
 ) VALUES %s
 ON CONFLICT (contract_number) DO UPDATE SET
     entity_name        = EXCLUDED.entity_name,
@@ -105,6 +110,8 @@ ON CONFLICT (contract_number) DO UPDATE SET
     sub_prefecture     = EXCLUDED.sub_prefecture,
     district           = EXCLUDED.district,
     village            = EXCLUDED.village,
+    latitude           = EXCLUDED.latitude,
+    longitude          = EXCLUDED.longitude,
     updated_at         = NOW();
 """
 
@@ -125,6 +132,16 @@ def parse_amount(v):
         return None
     try:
         return float(str(v).replace(",", ""))
+    except Exception:
+        return None
+
+
+def parse_float(v):
+    """Convertit une valeur GPS en float — retourne None si invalide."""
+    if v is None:
+        return None
+    try:
+        return float(v)
     except Exception:
         return None
 
@@ -164,6 +181,11 @@ def transform_contract(item):
     raw_status = item.get("status")
     status = raw_status.upper() if raw_status else None
 
+    # GPS — depuis profile.gps (présent uniquement si l'agent a géolocalisé)
+    gps       = profile.get("gps") or {}
+    latitude  = parse_float(gps.get("latitude"))
+    longitude = parse_float(gps.get("longitude"))
+
     return (
         str(contract_number),
         entity.get("name"),
@@ -190,9 +212,11 @@ def transform_contract(item):
         agent.get("agentNumber"),
         concat_name(ag_prof.get("firstName"), ag_prof.get("lastName")),
         profile.get("region"),
-        profile.get("commune"),      # ← sous-préfecture réelle UPYA
-        profile.get("district"),     # ← district administratif UPYA
+        profile.get("commune"),      # sous-préfecture réelle UPYA
+        profile.get("district"),     # district administratif UPYA
         profile.get("village"),
+        latitude,
+        longitude,
     )
 
 
@@ -201,7 +225,7 @@ def load_contracts(date=None):
     start_time = time.time()
 
     logger.info("=" * 50)
-    logger.info("SILVER LOADER — UPYA CONTRACTS v3.2")
+    logger.info("SILVER LOADER — UPYA CONTRACTS v3.3")
     logger.info("=" * 50)
 
     minio_client = get_minio_client()
@@ -211,11 +235,13 @@ def load_contracts(date=None):
     init_schemas(conn)
     cur = conn.cursor()
 
-    # Ajouter colonnes si absentes (migration safe)
+    # Migration safe — ajoute les colonnes si absentes
     cur.execute("""
         ALTER TABLE IF EXISTS silver.upya_contracts
         ADD COLUMN IF NOT EXISTS sub_prefecture TEXT,
-        ADD COLUMN IF NOT EXISTS district       TEXT
+        ADD COLUMN IF NOT EXISTS district       TEXT,
+        ADD COLUMN IF NOT EXISTS latitude       DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS longitude      DOUBLE PRECISION
     """)
     conn.commit()
 
@@ -258,7 +284,8 @@ def load_contracts(date=None):
     cur.execute("""
         SELECT entity_name, COUNT(*),
                COUNT(repossession_date) AS avec_repossession_date,
-               COUNT(sub_prefecture)   AS avec_sub_prefecture
+               COUNT(sub_prefecture)   AS avec_sub_prefecture,
+               COUNT(latitude)         AS avec_gps
         FROM silver.upya_contracts
         GROUP BY entity_name ORDER BY COUNT(*) DESC
     """)
@@ -267,13 +294,14 @@ def load_contracts(date=None):
         logger.info(
             f"  {row[0] or 'NULL':10} : {row[1]:,} contrats "
             f"| {row[2]:,} repossessions "
-            f"| {row[3]:,} avec sub_prefecture"
+            f"| {row[3]:,} avec sub_prefecture "
+            f"| {row[4]:,} avec GPS"
         )
     cur.close()
 
     duration = time.time() - start_time
     logger.info("=" * 50)
-    logger.info(f"✅ SILVER CONTRACTS v3.2 TERMINÉ")
+    logger.info(f"SILVER CONTRACTS v3.3 TERMINÉ")
     logger.info(f"   Lignes   : {total_rows:,}")
     logger.info(f"   Erreurs  : {total_errors}")
     logger.info(f"   Durée    : {duration:.1f}s")

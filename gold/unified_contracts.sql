@@ -1,14 +1,9 @@
 -- gold/unified_contracts.sql
 -- VUE UNIFIÉE — Contrats UPYA (TEVIA + GREENO) + SURGE
 --
--- v8 :
---   - entite = TEVIA ou GREENO (entreprise propriétaire)
---   - source = UPYA ou SURGE (CRM - origine technique)
---   - categorie = upya_tevia / upya_greeno / surge_tevia /
---                 surge_neotci / surge_zeci
---   - paid_off SURGE depuis silver.surge_paidoff
---   - total_paid SURGE depuis surge_financials (surge_payments)
---   - CLD logique métier corrigée
+-- v9 :
+--   - latitude / longitude UPYA depuis silver.upya_contracts (profile.gps)
+--   - latitude / longitude SURGE depuis silver.surge_contracts (natif)
 
 CREATE OR REPLACE VIEW gold.unified_contracts AS
 WITH
@@ -16,7 +11,6 @@ neotci AS (
     SELECT contract_number FROM silver.surge_neotci_list
 ),
 surge_financials AS (
-    -- Source 1 : surge_payments (transactions mobile money)
     SELECT
         m.installation_id::text      AS installation_id,
         SUM(p.amount)                AS total_paid,
@@ -28,8 +22,6 @@ surge_financials AS (
 
     UNION ALL
 
-    -- Source 2 : surge_lease_engine (anciens contrats ZOLA)
-    -- Uniquement les contrats absents de surge_payments
     SELECT
         le.installation_id::text     AS installation_id,
         SUM(le.total_cash_collected) AS total_paid,
@@ -43,7 +35,6 @@ surge_financials AS (
     )
     GROUP BY le.installation_id::text
 ),
--- paid_off SURGE depuis fichier Ownership_reached
 surge_paidoff_lookup AS (
     SELECT contract_number, paid_off_date
     FROM silver.surge_paidoff
@@ -64,13 +55,11 @@ upya_assets_latest AS (
 upya AS (
     SELECT
         c.contract_number,
-        -- entite = entreprise propriétaire
         CASE
             WHEN c.entity_name = 'GREENO' THEN 'GREENO'
             ELSE 'TEVIA'
         END                                     AS entite,
         'UPYA'                                  AS source,
-        -- categorie = sous-type précis
         CASE
             WHEN c.entity_name = 'GREENO' THEN 'upya_greeno'
             ELSE 'upya_tevia'
@@ -97,7 +86,9 @@ upya AS (
         c.product_name,
         c.region,
         c.district                              AS sub_prefecture,
-        c.village
+        c.village,
+        c.latitude,
+        c.longitude
     FROM silver.upya_contracts c
     LEFT JOIN upya_assets_latest a
         ON a.contract_number = c.contract_number
@@ -108,10 +99,8 @@ upya AS (
 surge AS (
     SELECT
         s.installation_id::TEXT                 AS contract_number,
-        -- entite = entreprise propriétaire (SURGE = TEVIA uniquement)
         'TEVIA'                                 AS entite,
         'SURGE'                                 AS source,
-        -- categorie = sous-type précis
         CASE
             WHEN s.installation_id::TEXT IN (SELECT contract_number FROM neotci)
                 THEN 'surge_neotci'
@@ -127,7 +116,6 @@ surge AS (
         s.activated_at                          AS registration_date,
         s.paid_at                               AS last_status_update,
         s.unlocked_until::TIMESTAMPTZ           AS next_status_update,
-        -- paid_off_date depuis silver.surge_paidoff (Ownership_reached)
         sp.paid_off_date::TIMESTAMPTZ           AS paid_off_date,
         s.removed_at::TIMESTAMPTZ               AS repossession_date,
         NULL::TEXT                              AS asset_number,
@@ -143,7 +131,6 @@ surge AS (
             ELSE NULL
         END                                     AS remaining_debt,
         s.status                                AS contract_status_raw,
-        -- paid_off_raw depuis surge_paidoff uniquement
         CASE
             WHEN sp.paid_off_date IS NOT NULL THEN 'yes'
             ELSE 'no'
@@ -151,7 +138,9 @@ surge AS (
         COALESCE(pl.product_name, s.financial_type) AS product_name,
         s.region,
         s.ward                                  AS sub_prefecture,
-        NULL::TEXT                              AS village
+        NULL::TEXT                              AS village,
+        s.latitude,
+        s.longitude
     FROM silver.surge_contracts s
     LEFT JOIN surge_financials sf
         ON sf.installation_id = s.installation_id
@@ -168,7 +157,6 @@ unified_raw AS (
 normalized AS (
     SELECT
         *,
-        -- APRÈS
         CASE
             WHEN paid_off_date IS NOT NULL AND source = 'SURGE'
                 THEN 'PAID_OFF'
@@ -223,9 +211,8 @@ SELECT
     region,
     sub_prefecture,
     village,
-    -- CLD logique métier :
-    -- NULL si FULL, REPOSSESSED, CANCELLED, ou paid_off
-    -- Calculé depuis next_status_update sinon
+    latitude,
+    longitude,
     CASE
         WHEN deal_type = 'FULL'                 THEN NULL
         WHEN contract_status = 'REPOSSESSED'    THEN NULL
@@ -246,10 +233,12 @@ SELECT
 FROM normalized;
 
 COMMENT ON VIEW gold.unified_contracts IS
-'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v8.
+'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v9.
 entite       : TEVIA ou GREENO (entreprise propriétaire)
 source       : UPYA ou SURGE (origine technique)
 categorie    : upya_tevia / upya_greeno / surge_tevia / surge_neotci / surge_zeci
+latitude     : GPS client UPYA (profile.gps) / SURGE (natif) — NULL si non renseigné
+longitude    : GPS client UPYA (profile.gps) / SURGE (natif) — NULL si non renseigné
 paid_off     : surge_paidoff (Ownership_reached) pour SURGE / upya_contracts pour UPYA
 repossession : upya_contracts.repossession_date / surge_contracts.removed_at
 registration : deploy_date UPYA / activated_at SURGE';
