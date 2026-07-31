@@ -1,30 +1,24 @@
 name: Pipeline Quotidien TEVIA & GREENO
-
 on:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '30 3 * * *'
   workflow_dispatch:
-
 jobs:
   pipeline:
     name: ETL Pipeline
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    timeout-minutes: 90
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           ref: master
-
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Create .env file
         run: |
           echo "DB_HOST=${{ secrets.DB_HOST }}" >> .env
@@ -42,36 +36,24 @@ jobs:
           echo "UPYA_PASSWORD=${{ secrets.UPYA_PASSWORD }}" >> .env
           echo "SURGE_DRIVE_FOLDER=${{ secrets.SURGE_DRIVE_FOLDER }}" >> .env
           echo "GOOGLE_CREDENTIALS_PATH=config/google_credentials.json" >> .env
-
       - name: Create Google credentials file
         run: |
           mkdir -p config
           echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > config/google_credentials.json
-
-      - name: Debug .env
-        run: cat .env
-
       - name: Bronze - Extraction contracts UPYA
         run: python bronze/upya/generic_extractor.py contracts
-
       - name: Bronze - Extraction payments UPYA
         run: python bronze/upya/generic_extractor.py payments
-
       - name: Bronze - Extraction assets UPYA
         run: python bronze/upya/generic_extractor.py assets
-
       - name: Silver - Chargement contracts UPYA
         run: python silver/upya/contracts_loader.py
-
       - name: Silver - Chargement payments UPYA
         run: python silver/upya/payments_loader.py
-
       - name: Silver - Chargement assets UPYA
         run: python silver/upya/generic_loader.py assets
-
       - name: Gold - Snapshot quotidien
         run: python gold/snapshot_builder.py
-
       - name: Statut pipeline
         if: always()
         run: |
