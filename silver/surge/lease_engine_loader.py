@@ -4,10 +4,18 @@
 # depuis Google Drive vers silver.surge_lease_engine
 #
 # SOURCE : surge_lease_engine.csv dans Drive (surge_payments/)
-#          = lbl_conso_complet (historique nov 2017 → mai 2026)
+#          = lbl_conso_complet (historique nov 2017 → juillet 2026)
 #
-# UTILISATION :
-#   python silver/surge/lease_engine_loader.py
+# NOTE (05/08/2026) : la table silver.surge_lease_engine existe déjà en
+# production avec les noms de colonnes contract_ref / ending_balance_principal /
+# ending_balance_interest (et non contract_ogc / ending_principal / ending_interest
+# comme dans une version antérieure de ce script). De nombreuses vues gold
+# (gold.unified_contracts et 10 vues qui en dépendent) reposent sur cette
+# structure existante -> ce script a été aligné sur la table réelle plutôt que
+# l'inverse, pour ne rien casser en aval.
+#
+# UTILISATION (depuis la racine du projet) :
+#   python -m silver.surge.lease_engine_loader
 
 import os
 import sys
@@ -33,32 +41,34 @@ logger = logging.getLogger(__name__)
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS silver.surge_lease_engine (
     -- Identifiants
-    contract_ogc          TEXT,           -- Numéro NetSuite (OGCxxxxxxx)
-    installation_id       TEXT,           -- Surge Installation Id
+    contract_ref             TEXT,           -- Numéro NetSuite (OGCxxxxxxx)
+    installation_id          TEXT,           -- Surge Installation Id
 
     -- Période
-    posting_date          DATE,           -- Date de la période (mensuelle)
-    billing_date          DATE,           -- Date de facturation
-    period                INTEGER,        -- Numéro de période
+    posting_date              DATE,           -- Date de la période (mensuelle)
+    billing_date               DATE,           -- Date de facturation
+    period                      INTEGER,        -- Numéro de période
 
     -- Cash collecté
-    total_cash_collected  NUMERIC(18,2),  -- Total encaissé cumulé
+    total_cash_collected      NUMERIC(18,2),  -- Total encaissé cumulé
 
     -- Soldes de clôture
-    ending_principal      NUMERIC(18,2),  -- Principal restant
-    ending_interest       NUMERIC(18,2),  -- Intérêts restants
-    total_ending_balance  NUMERIC(18,2),  -- Solde total restant
+    ending_balance_principal  NUMERIC(18,2),  -- Principal restant
+    ending_balance_interest   NUMERIC(18,2),  -- Intérêts restants
+    total_ending_balance      NUMERIC(18,2),  -- Solde total restant
 
     -- Infos contrat
-    status                TEXT,
-    subsidiary            TEXT,           -- OGE : NEOT ou JV
-    contract_type         TEXT,
+    status                       TEXT,
+    subsidiary                  TEXT,           -- OGE : NEOT ou JV
+    contract_type               TEXT,
 
     -- Méta
-    loaded_at             TIMESTAMPTZ DEFAULT NOW(),
+    loaded_at                   TIMESTAMPTZ DEFAULT NOW(),
 
-    -- Clé primaire composite
-    PRIMARY KEY (contract_ogc, posting_date)
+    -- Clé primaire composite RÉELLE, confirmée en base le 05/08/2026 via
+    -- information_schema.table_constraints (PAS contract_ref/posting_date,
+    -- qui n'était qu'une hypothèse initiale erronée)
+    PRIMARY KEY (installation_id, period)
 );
 
 CREATE INDEX IF NOT EXISTS idx_lease_engine_installation
@@ -71,17 +81,18 @@ CREATE INDEX IF NOT EXISTS idx_lease_engine_subsidiary
 
 UPSERT_SQL = """
 INSERT INTO silver.surge_lease_engine (
-    contract_ogc, installation_id,
+    contract_ref, installation_id,
     posting_date, billing_date, period,
     total_cash_collected,
-    ending_principal, ending_interest, total_ending_balance,
+    ending_balance_principal, ending_balance_interest, total_ending_balance,
     status, subsidiary, contract_type
 ) VALUES %s
-ON CONFLICT (contract_ogc, posting_date) DO UPDATE SET
-    total_cash_collected = EXCLUDED.total_cash_collected,
-    ending_principal     = EXCLUDED.ending_principal,
-    ending_interest      = EXCLUDED.ending_interest,
-    total_ending_balance = EXCLUDED.total_ending_balance;
+ON CONFLICT (installation_id, period) DO UPDATE SET
+    contract_ref              = EXCLUDED.contract_ref,
+    total_cash_collected     = EXCLUDED.total_cash_collected,
+    ending_balance_principal = EXCLUDED.ending_balance_principal,
+    ending_balance_interest  = EXCLUDED.ending_balance_interest,
+    total_ending_balance     = EXCLUDED.total_ending_balance;
 """
 
 
@@ -184,28 +195,34 @@ def load_lease_engine():
 
         # Renommage colonnes
         df = df.rename(columns={
-            "Contract":                          "contract_ogc",
+            "Contract":                          "contract_ref",
             "Surge Installation Id":             "installation_id",
             "Posting Date":                      "posting_date",
             "Billing Date":                      "billing_date",
             "Period":                            "period",
             "Total Cash Collected from Customer":"total_cash_collected",
-            "Ending Balance Principal":          "ending_principal",
-            "Ending Balance Interest":           "ending_interest",
+            "Ending Balance Principal":          "ending_balance_principal",
+            "Ending Balance Interest":           "ending_balance_interest",
             "Total Ending Balance":              "total_ending_balance",
             "Status":                            "status",
             "Subsidiary":                        "subsidiary",
             "Contract Type":                     "contract_type",
         })
 
-        # Nettoyage clé primaire
-        df["contract_ogc"]  = df["contract_ogc"].apply(clean_value)
-        df["posting_date"]  = df["posting_date"].apply(clean_date)
-        df = df[df["contract_ogc"].notna() & df["posting_date"].notna()]
+        # Nettoyage colonnes clés
+        df["contract_ref"]    = df["contract_ref"].apply(clean_value)
+        df["installation_id"] = df["installation_id"].apply(clean_value)
+        df["posting_date"]    = df["posting_date"].apply(clean_date)
 
-        # Filtrer les lignes parasites (ex: "Overall Total")
-        df = df[df["contract_ogc"].str.startswith("OGC", na=False)]
-        df = df.drop_duplicates(subset=["contract_ogc", "posting_date"], keep="last")
+        # Filtre sur la VRAIE clé primaire (installation_id, period) confirmée
+        # en base -- contract_ref/posting_date restent des colonnes normales,
+        # plus la clé de déduplication.
+        df = df[df["installation_id"].notna() & df["period"].notna()]
+
+        # Filtrer les lignes parasites (ex: "Overall Total", qui n'a pas de
+        # contract_ref commençant par "OGC")
+        df = df[df["contract_ref"].str.startswith("OGC", na=False)]
+        df = df.drop_duplicates(subset=["installation_id", "period"], keep="last")
         logger.info(f"Lignes valides : {len(df):,}")
 
         # Upsert par chunks
@@ -220,23 +237,27 @@ def load_lease_engine():
                 continue
 
             rows = []
-            for _, r in chunk.iterrows():
+            for r in chunk.itertuples(index=False):
+                r = r._asdict()
                 rows.append((
-                    clean_value(r.get("contract_ogc")),
+                    clean_value(r.get("contract_ref")),
                     clean_value(r.get("installation_id")),
                     clean_date(r.get("posting_date")),
                     clean_date(r.get("billing_date")),
                     clean_int(r.get("period")),
                     clean_number(r.get("total_cash_collected")),
-                    clean_number(r.get("ending_principal")),
-                    clean_number(r.get("ending_interest")),
+                    clean_number(r.get("ending_balance_principal")),
+                    clean_number(r.get("ending_balance_interest")),
                     clean_number(r.get("total_ending_balance")),
                     clean_value(r.get("status")),
                     clean_value(r.get("subsidiary")),
                     clean_value(r.get("contract_type")),
                 ))
 
-            rows = [r for r in rows if r[0] and r[2]]
+            # index 1 = installation_id, index 4 = period -- la vraie clé primaire
+            # (test "is not None", pas juste "truthy" : period=0 est une valeur
+            # légitime qu'un simple `if r[4]` aurait éliminée par erreur)
+            rows = [r for r in rows if r[1] is not None and r[4] is not None]
 
             cur = conn.cursor()
             execute_values(cur, UPSERT_SQL, rows, page_size=1000)
@@ -252,7 +273,7 @@ def load_lease_engine():
             SELECT
                 MIN(posting_date) as debut,
                 MAX(posting_date) as fin,
-                COUNT(DISTINCT contract_ogc) as contrats,
+                COUNT(DISTINCT contract_ref) as contrats,
                 COUNT(DISTINCT installation_id) as installations
             FROM silver.surge_lease_engine
         """)
