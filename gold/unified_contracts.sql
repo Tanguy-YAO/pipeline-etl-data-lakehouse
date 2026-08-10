@@ -118,7 +118,7 @@ surge AS (
         s.unlocked_until::TIMESTAMPTZ           AS next_status_update,
         sp.paid_off_date::TIMESTAMPTZ           AS paid_off_date,
         s.removed_at::TIMESTAMPTZ               AS repossession_date,
-        NULL::TEXT                              AS asset_number,
+        m.asset_number::TEXT                    AS asset_number,
         COALESCE(pl.deal_type, 'PAYG')          AS deal_type_raw,
         pl.total_contract_value,
         pl.upfront_payment,
@@ -148,6 +148,8 @@ surge AS (
         ON pl.installation_id = s.installation_id::TEXT
     LEFT JOIN surge_paidoff_lookup sp
         ON sp.contract_number = s.installation_id::TEXT
+    LEFT JOIN silver.surge_asset_mapping m
+        ON m.installation_id = s.installation_id
 ),
 unified_raw AS (
     SELECT * FROM upya
