@@ -1,4 +1,3 @@
-
 # database/db_client.py
 # Brique de connexion PostgreSQL pour les couches Silver & Gold
 
@@ -243,6 +242,46 @@ def get_last_successful_run(conn, source, entity):
     finally:
         cur.close()
 
+# Watermark Silver — suivi de progression par source/entite
+#
+# AJOUT (21/08/2026) : necessaire suite au correctif de
+# list_bronze_files (voir storage/minio_client.py) -- permet a chaque
+# loader Silver de savoir jusqu'ou il est deja alle, sans jamais tout
+# recharger ni rien sauter en cas d'echec d'un run precedent.
+
+def get_load_watermark(conn, source, entity):
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE SCHEMA IF NOT EXISTS silver_meta;
+        CREATE TABLE IF NOT EXISTS silver_meta.load_watermark (
+            source TEXT NOT NULL,
+            entity TEXT NOT NULL,
+            last_processed_date TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (source, entity)
+        );
+    """)
+    conn.commit()
+    cur.execute("""
+        SELECT last_processed_date FROM silver_meta.load_watermark
+        WHERE source = %s AND entity = %s
+    """, (source, entity))
+    row = cur.fetchone()
+    cur.close()
+    return row[0] if row else None  # None = tout charger (premiere fois)
+
+
+def set_load_watermark(conn, source, entity, last_date):
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO silver_meta.load_watermark (source, entity, last_processed_date, updated_at)
+        VALUES (%s, %s, %s, NOW())
+        ON CONFLICT (source, entity) DO UPDATE SET
+            last_processed_date = EXCLUDED.last_processed_date,
+            updated_at = NOW();
+    """, (source, entity, last_date))
+    conn.commit()
+    cur.close()
 
 
 # TEST — python database/db_client.py
@@ -299,5 +338,3 @@ if __name__ == "__main__":
     conn.close()
 
     print("\n TEST TERMINÉ \n")
-
-    
