@@ -1,6 +1,6 @@
 
 # database/db_client.py
-# Brique de connexion PostgreSQL — couches Silver & Gold
+# Brique de connexion PostgreSQL pour les couches Silver & Gold
 
 import os
 import logging
@@ -253,7 +253,7 @@ if __name__ == "__main__":
         format="%(asctime)s - %(levelname)s - %(message)s"
     )
 
-    print("\n=== TEST CONNEXION POSTGRESQL ===\n")
+    print("\n TEST CONNEXION POSTGRESQL\n")
 
     # Test 1 : connexion simple
     conn = get_db_connection()
@@ -291,11 +291,13 @@ if __name__ == "__main__":
         duration_sec=1.5,
         minio_prefix="bronze/test/ping/2026/05/26/"
     )
-    print(f"✅ Run loggé avec id={run_id}")
+    print(f"Run loggé avec id={run_id}")
 
     # Test 5 : récupération du dernier run
     last = get_last_successful_run(conn, "test", "ping")
-    print(f"✅ Dernier run : {last}")
+    print(f"Dernier run : {last}")
     conn.close()
 
-    print("\n=== TEST TERMINÉ ===\n")
+    print("\n TEST TERMINÉ \n")
+
+    

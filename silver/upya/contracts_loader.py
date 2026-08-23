@@ -1,4 +1,4 @@
-# silver/upya/contracts_loader.py v3.3
+# silver/upya/contracts_loader.py v3.4
 #
 # NOUVEAUTÉS v3 :
 # - Ajout repossession_date (depuis repossessionDate API)
@@ -11,6 +11,10 @@
 # - district conservé séparément
 # CORRECTION v3.3 :
 # - Ajout latitude et longitude depuis profile.gps (UPYA API)
+# CORRECTION v3.4 (21/08/2026) :
+# - Watermark Silver : ne relit plus TOUT l'historique Bronze a chaque
+#   run (cause du timeout de 90min du 21/08/2026), seulement les
+#   fichiers non encore traites avec succes. Voir silver_meta.load_watermark.
 
 import os
 import sys
@@ -24,7 +28,10 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from storage.minio_client import get_minio_client, list_bronze_files, download_json
-from database.db_client import get_db_connection, init_schemas
+from database.db_client import (
+    get_db_connection, init_schemas,
+    get_load_watermark, set_load_watermark
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -181,7 +188,6 @@ def transform_contract(item):
     raw_status = item.get("status")
     status = raw_status.upper() if raw_status else None
 
-    # GPS — depuis profile.gps (présent uniquement si l'agent a géolocalisé)
     gps       = profile.get("gps") or {}
     latitude  = parse_float(gps.get("latitude"))
     longitude = parse_float(gps.get("longitude"))
@@ -212,8 +218,8 @@ def transform_contract(item):
         agent.get("agentNumber"),
         concat_name(ag_prof.get("firstName"), ag_prof.get("lastName")),
         profile.get("region"),
-        profile.get("commune"),      # sous-préfecture réelle UPYA
-        profile.get("district"),     # district administratif UPYA
+        profile.get("commune"),
+        profile.get("district"),
         profile.get("village"),
         latitude,
         longitude,
@@ -225,7 +231,7 @@ def load_contracts(date=None):
     start_time = time.time()
 
     logger.info("=" * 50)
-    logger.info("SILVER LOADER — UPYA CONTRACTS v3.3")
+    logger.info("SILVER LOADER — UPYA CONTRACTS v3.4")
     logger.info("=" * 50)
 
     minio_client = get_minio_client()
@@ -235,7 +241,6 @@ def load_contracts(date=None):
     init_schemas(conn)
     cur = conn.cursor()
 
-    # Migration safe — ajoute les colonnes si absentes
     cur.execute("""
         ALTER TABLE IF EXISTS silver.upya_contracts
         ADD COLUMN IF NOT EXISTS sub_prefecture TEXT,
@@ -250,14 +255,20 @@ def load_contracts(date=None):
     cur.close()
     logger.info("Table silver.upya_contracts prête")
 
-    files = list_bronze_files(minio_client, bucket, "upya", "contracts", date)
+    # Watermark : ne relit que les fichiers non encore traites avec succes,
+    # sauf appel explicite avec une date precise (rejeu manuel d'un jour donne)
+    since = date if date else get_load_watermark(conn, "upya", "contracts")
+    files = list_bronze_files(minio_client, bucket, "upya", "contracts", since_date=since)
+
     if not files:
-        logger.warning("Aucun fichier Bronze trouvé pour contracts")
+        logger.warning("Aucun nouveau fichier Bronze pour contracts depuis le dernier chargement")
+        conn.close()
         return 0
 
-    logger.info(f"Fichiers à traiter : {len(files)}")
+    logger.info(f"Fichiers à traiter : {len(files)} (depuis {since or 'le début'})")
     total_rows   = 0
     total_errors = 0
+    max_date_seen = since
 
     for file_key in files:
         try:
@@ -265,20 +276,33 @@ def load_contracts(date=None):
             items   = json.loads(content)
             rows    = [r for r in (transform_contract(i) for i in items) if r]
 
-            if not rows:
-                continue
+            if rows:
+                cur = conn.cursor()
+                execute_values(cur, UPSERT_SQL, rows, page_size=200)
+                conn.commit()
+                cur.close()
+                total_rows += len(rows)
+                logger.info(f"  {file_key.split('/')[-1]} → {len(rows)} contrats")
 
-            cur = conn.cursor()
-            execute_values(cur, UPSERT_SQL, rows, page_size=200)
-            conn.commit()
-            cur.close()
-            total_rows += len(rows)
-            logger.info(f"  {file_key.split('/')[-1]} → {len(rows)} contrats")
+            # Extrait la date du chemin bronze/upya/contracts/YYYY/MM/DD/xxx.json
+            path_parts = file_key.split("/")
+            file_date = "/".join(path_parts[3:6])
+            if max_date_seen is None or file_date > max_date_seen:
+                max_date_seen = file_date
 
         except Exception as e:
             conn.rollback()
             logger.error(f"Erreur {file_key} : {e}")
             total_errors += 1
+
+    # N'avance le watermark que si tout s'est bien passe -- en cas d'erreur,
+    # on prefere retraiter ces fichiers au prochain run plutot que de risquer
+    # de perdre silencieusement un changement de statut.
+    if total_errors == 0 and max_date_seen and not date:
+        set_load_watermark(conn, "upya", "contracts", max_date_seen)
+        logger.info(f"Watermark Silver mis à jour : {max_date_seen}")
+    elif total_errors > 0:
+        logger.warning(f"{total_errors} erreur(s) rencontrée(s) — watermark non avancé, ces fichiers seront retraités au prochain run")
 
     cur = conn.cursor()
     cur.execute("""
@@ -301,7 +325,7 @@ def load_contracts(date=None):
 
     duration = time.time() - start_time
     logger.info("=" * 50)
-    logger.info(f"SILVER CONTRACTS v3.3 TERMINÉ")
+    logger.info(f"SILVER CONTRACTS v3.4 TERMINÉ")
     logger.info(f"   Lignes   : {total_rows:,}")
     logger.info(f"   Erreurs  : {total_errors}")
     logger.info(f"   Durée    : {duration:.1f}s")

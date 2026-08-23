@@ -3,6 +3,11 @@
 #
 # RÔLE : Loader générique pour les entités UPYA simples.
 # Lit les JSON Bronze MinIO et charge dans PostgreSQL Silver.
+#
+# CORRECTIF (21/08/2026) : watermark Silver ajoute -- ne relit plus
+# TOUT l'historique Bronze a chaque run (cause du timeout de 90min
+# sur assets le 21/08/2026), seulement les fichiers non encore
+# traites avec succes. Voir silver_meta.load_watermark.
 # ============================================================
 
 import os
@@ -16,7 +21,10 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from storage.minio_client import get_minio_client, list_bronze_files, download_json
-from database.db_client import get_db_connection, init_schemas
+from database.db_client import (
+    get_db_connection, init_schemas,
+    get_load_watermark, set_load_watermark
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# Configuration des entités
+# Configuration des entités (INCHANGÉ)
 # ============================================================
 ENTITIES = {
     "assets": {
@@ -242,15 +250,21 @@ def load_entity(entity_name, date=None):
     cur.close()
     logger.info(f"Table silver.upya_{entity_name} prête")
 
-    files = list_bronze_files(minio_client, bucket, "upya", entity_name, date)
+    # Watermark : ne relit que les fichiers non encore traites avec succes,
+    # sauf appel explicite avec une date precise (rejeu manuel d'un jour donne)
+    since = date if date else get_load_watermark(conn, "upya", entity_name)
+    files = list_bronze_files(minio_client, bucket, "upya", entity_name, since_date=since)
+
     if not files:
-        logger.warning(f"Aucun fichier Bronze pour {entity_name}")
+        logger.warning(f"Aucun nouveau fichier Bronze pour {entity_name} depuis le dernier chargement")
+        conn.close()
         return 0
 
-    logger.info(f"Fichiers à traiter : {len(files)}")
+    logger.info(f"Fichiers à traiter : {len(files)} (depuis {since or 'le début'})")
 
-    total_rows   = 0
-    total_errors = 0
+    total_rows    = 0
+    total_errors  = 0
+    max_date_seen = since
 
     for file_key in files:
         try:
@@ -265,21 +279,29 @@ def load_entity(entity_name, date=None):
                 else:
                     total_errors += 1
 
-            if not rows:
-                continue
+            if rows:
+                cur = conn.cursor()
+                execute_values(cur, config["upsert_sql"], rows, page_size=500)
+                conn.commit()
+                cur.close()
+                total_rows += len(rows)
+                logger.info(f"  {file_key.split('/')[-1]} → {len(rows)} lignes")
 
-            cur = conn.cursor()
-            execute_values(cur, config["upsert_sql"], rows, page_size=500)
-            conn.commit()
-            cur.close()
-
-            total_rows += len(rows)
-            logger.info(f"  {file_key.split('/')[-1]} → {len(rows)} lignes")
+            path_parts = file_key.split("/")
+            file_date = "/".join(path_parts[3:6])
+            if max_date_seen is None or file_date > max_date_seen:
+                max_date_seen = file_date
 
         except Exception as e:
             conn.rollback()
             logger.error(f"Erreur {file_key} : {e}")
             total_errors += 1
+
+    if total_errors == 0 and max_date_seen and not date:
+        set_load_watermark(conn, "upya", entity_name, max_date_seen)
+        logger.info(f"Watermark Silver mis à jour ({entity_name}) : {max_date_seen}")
+    elif total_errors > 0:
+        logger.warning(f"{total_errors} erreur(s) — watermark {entity_name} non avancé, retraité au prochain run")
 
     duration = time.time() - start_time
     logger.info("=" * 50)
