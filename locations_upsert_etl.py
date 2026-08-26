@@ -164,8 +164,10 @@ def load_gsheet_df_by_env(env_id_key: str, env_ws_key: str, default_ws="Sheet1")
 
 def ensure_table_and_indexes(conn):
     with conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS silver;")
+
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS public.upya_locations (
+        CREATE TABLE IF NOT EXISTS silver.upya_locations (
             id                          SERIAL PRIMARY KEY,
             district                    VARCHAR(100),
             region                      VARCHAR(100),
@@ -189,7 +191,7 @@ def ensure_table_and_indexes(conn):
             "ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION",
             "ADD COLUMN IF NOT EXISTS regional_service_supervisor VARCHAR(255)",
         ]:
-            cur.execute(f"ALTER TABLE public.upya_locations {col_def};")
+            cur.execute(f"ALTER TABLE silver.upya_locations {col_def};")
 
         # Contrainte UNIQUE pour l'upsert logique sur la "clé géographique"
         cur.execute("""
@@ -197,10 +199,10 @@ def ensure_table_and_indexes(conn):
         BEGIN
             IF NOT EXISTS (
                 SELECT 1 FROM information_schema.table_constraints
-                WHERE table_schema='public' AND table_name='upya_locations'
+                WHERE table_schema='silver' AND table_name='upya_locations'
                   AND constraint_type='UNIQUE' AND constraint_name='uk_location_key'
             ) THEN
-                ALTER TABLE public.upya_locations
+                ALTER TABLE silver.upya_locations
                 ADD CONSTRAINT uk_location_key
                 UNIQUE (district, region, departement, sous_prefecture);
             END IF;
@@ -208,10 +210,10 @@ def ensure_table_and_indexes(conn):
         """)
 
         for q in [
-            "CREATE INDEX IF NOT EXISTS idx_loc_region ON public.upya_locations(region)",
-            "CREATE INDEX IF NOT EXISTS idx_loc_district ON public.upya_locations(district)",
-            "CREATE INDEX IF NOT EXISTS idx_loc_departement ON public.upya_locations(departement)",
-            "CREATE INDEX IF NOT EXISTS idx_loc_souspref ON public.upya_locations(sous_prefecture)",
+            "CREATE INDEX IF NOT EXISTS idx_loc_region ON silver.upya_locations(region)",
+            "CREATE INDEX IF NOT EXISTS idx_loc_district ON silver.upya_locations(district)",
+            "CREATE INDEX IF NOT EXISTS idx_loc_departement ON silver.upya_locations(departement)",
+            "CREATE INDEX IF NOT EXISTS idx_loc_souspref ON silver.upya_locations(sous_prefecture)",
         ]:
             cur.execute(q)
 
@@ -278,7 +280,7 @@ def upsert_locations_batch(conn, df_batch: pd.DataFrame):
     cols_sql  = ", ".join(INSERT_COLS)
     template  = "(" + ", ".join(["%s"] * len(INSERT_COLS)) + ")"
     insert_sql = f"""
-    INSERT INTO public.upya_locations ({cols_sql})
+    INSERT INTO silver.upya_locations ({cols_sql})
     VALUES %s
     ON CONFLICT (district, region, departement, sous_prefecture) DO UPDATE SET
     {UPSERT_UPDATE_SET}
@@ -319,7 +321,7 @@ def preview_delta(conn, df_clean: pd.DataFrame):
                  nombre_menages, decoupage_regional_tevia, rss, dsm,
                  regional_service_supervisor,
                  latitude, longitude
-          FROM public.upya_locations
+          FROM silver.upya_locations
         """)
         rows = cur.fetchall()
 
