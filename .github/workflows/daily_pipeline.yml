@@ -36,6 +36,9 @@ jobs:
           echo "UPYA_PASSWORD=${{ secrets.UPYA_PASSWORD }}" >> .env
           echo "SURGE_DRIVE_FOLDER=${{ secrets.SURGE_DRIVE_FOLDER }}" >> .env
           echo "GOOGLE_CREDENTIALS_PATH=config/google_credentials.json" >> .env
+          echo "GOOGLE_APPLICATION_CREDENTIALS=config/google_credentials.json" >> .env
+          echo "GS_LOCATIONS_ID=${{ secrets.GS_LOCATIONS_ID }}" >> .env
+          echo "GS_LOCATIONS_WS=liste" >> .env
       - name: Create Google credentials file
         run: |
           mkdir -p config
@@ -46,12 +49,18 @@ jobs:
         run: python bronze/upya/generic_extractor.py payments
       - name: Bronze - Extraction assets UPYA
         run: python bronze/upya/generic_extractor.py assets
+      - name: Bronze - Extraction clients UPYA
+        run: python bronze/upya/generic_extractor.py clients
       - name: Silver - Chargement contracts UPYA
         run: python silver/upya/contracts_loader.py
       - name: Silver - Chargement payments UPYA
         run: python silver/upya/payments_loader.py
       - name: Silver - Chargement assets UPYA
         run: python silver/upya/generic_loader.py assets
+      - name: Silver - Chargement clients UPYA
+        run: python silver/upya/generic_loader.py clients
+      - name: Silver - Chargement locations (Google Sheets)
+        run: python locations_upsert_etl.py
       - name: Gold - Snapshot quotidien
         run: python gold/snapshot_builder.py
       - name: Statut pipeline
