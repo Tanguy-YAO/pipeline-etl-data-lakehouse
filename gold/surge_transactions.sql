@@ -18,7 +18,7 @@
 -- paiement à l'autre (base sur daily_rate = monthly_payment/30), que j'ai
 -- choisi de ne PAS reconstruire pour les nouvelles transactions : une
 -- simulation à grande échelle (migrations/validate_surge_reconciliation.py)
--- a revel& des donn&es historiques incomplètes (asset_number ne capture que
+-- a revele des données historiques incomplètes (asset_number ne capture que
 -- le n° du kit ACTUEL d'un contrat, pas l'historique de remplacement de kits),
 -- rendant la validation de la formule moins fiable au-dela d'un échantillon
 -- restreint. L'écart mesuré sur les cas validés reste toutefois faible : le
@@ -29,6 +29,22 @@
 -- FRAICHEUR : cette vue se recalcule à chaque interrogation -- des que
 -- silver.surge_payments est rechargé (actuellement un processus manuel, gold.surge_transactions
 -- réflètera automatiquement les nouvelles lignes, sans script a relancer.
+--
+-- CORRECTIF (26/08/2026) -- BUG DE DOUBLON A LA DATE DE COUPURE :
+-- Quality check sur contrat 737425 a revele un ecart de 21 000 XOF entre
+-- notre vue (597 350) et le CRM (576 350). Cause : bi_legacy.payment_date
+-- est stocke sans heure (00:00:00 par defaut), alors que
+-- silver.surge_payments.paid_time garde l'heure exacte. Le filtre original
+-- `sp.paid_time > lk.last_date` comparait par exemple '2026-02-10 20:28:34'
+-- a '2026-02-10 00:00:00' -- toujours vrai le jour meme -- reinjectant une
+-- transaction du 10/02 DEJA comptee dans l'historique comme si elle etait
+-- nouvelle (doublon exact de 19 500 XOF confirme). Corrige en comparant les
+-- dates seules (::date) plutot que les timestamps complets.
+-- Ecart residuel de 1 500 XOF sur ce contrat non explique par ce correctif,
+-- a investiguer separement si besoin (hors cause du doublon principal).
+-- RISQUE RESIDUEL ASSUME : un contrat ayant reellement deux transactions
+-- distinctes le meme jour calendaire QUE le jour de coupure verrait la
+-- seconde exclue a tort -- prefere a un doublon systematique garanti.
 
 CREATE OR REPLACE VIEW gold.surge_transactions AS
 
@@ -72,4 +88,4 @@ LEFT JOIN (
     GROUP BY contract_number
 ) lk ON lk.contract_number = sc.contract_number
 WHERE sp.payment_status = 'Processed'
-  AND (lk.last_date IS NULL OR sp.paid_time > lk.last_date);
+  AND (lk.last_date IS NULL OR sp.paid_time::date > lk.last_date::date);
