@@ -85,7 +85,7 @@ upya AS (
         c.paid_off_status                       AS paid_off_raw,
         c.product_name,
         c.region,
-        c.district                              AS sub_prefecture,
+        c.sub_prefecture                              AS sub_prefecture,
         c.village,
         c.latitude,
         c.longitude
