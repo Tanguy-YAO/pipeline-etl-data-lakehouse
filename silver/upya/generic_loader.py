@@ -1,4 +1,3 @@
-# ============================================================
 # silver/upya/generic_loader.py
 #
 # RÔLE : Loader générique pour les entités UPYA simples.
@@ -8,14 +7,22 @@
 # TOUT l'historique Bronze a chaque run (cause du timeout de 90min
 # sur assets le 21/08/2026), seulement les fichiers non encore
 # traites avec succes. Voir silver_meta.load_watermark.
-# ============================================================
+#
+# CORRECTIF (28/08/2026) : deploy_date et date_added manquaient dans
+# le ON CONFLICT DO UPDATE de assets -- un asset extrait AVANT son
+# deploiement physique (deploy_date=NULL a ce moment) restait bloque
+# a NULL pour toujours, meme une fois reellement deploye et remonte
+# avec la vraie date lors d'une extraction ulterieure. Cause directe
+# du faible taux de remplissage de deploy_date (37,9% observe) et de
+# la sous-estimation des activations recentes dans les dashboards.
+# Necessite un rechargement complet apres deploiement (watermark reset)
+# pour reparer l'historique deja fige en base par ce bug.
 
 import os
 import sys
 import json
 import logging
 import time
-
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
@@ -32,9 +39,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# Configuration des entités (INCHANGÉ)
-# ============================================================
+# Configuration des entités
 ENTITIES = {
     "assets": {
         "create_sql": """
@@ -72,6 +77,8 @@ ENTITIES = {
                 client_number      = EXCLUDED.client_number,
                 held_by            = EXCLUDED.held_by,
                 distributed_status = EXCLUDED.distributed_status,
+                deploy_date        = EXCLUDED.deploy_date,
+                date_added         = EXCLUDED.date_added,
                 updated_at         = NOW();
         """,
         "transform": lambda item: _transform_asset(item),
