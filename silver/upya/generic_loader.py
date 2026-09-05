@@ -17,6 +17,8 @@
 # la sous-estimation des activations recentes dans les dashboards.
 # Necessite un rechargement complet apres deploiement (watermark reset)
 # pour reparer l'historique deja fige en base par ce bug.
+#
+# CORRECTIF (05/09/2026) : ajout entite agents
 
 import os
 import sys
@@ -139,12 +141,52 @@ ENTITIES = {
                 pricing_upfront, set_up_on
             ) VALUES %s
             ON CONFLICT (deal_number) DO UPDATE SET
-                status           = EXCLUDED.status,
-                total_cost       = EXCLUDED.total_cost,
+                status            = EXCLUDED.status,
+                total_cost        = EXCLUDED.total_cost,
                 pricing_recurring = EXCLUDED.pricing_recurring,
-                updated_at       = NOW();
+                updated_at        = NOW();
         """,
         "transform": lambda item: _transform_deal(item),
+    },
+    "agents": {
+        "create_sql": """
+            CREATE TABLE IF NOT EXISTS silver.upya_agents (
+                agent_number     TEXT PRIMARY KEY,
+                internal_number  TEXT,
+                first_name       TEXT,
+                last_name        TEXT,
+                gender           TEXT,
+                mobile           TEXT,
+                email            TEXT,
+                role             TEXT,
+                entity_name      TEXT,
+                country          TEXT,
+                country_code     TEXT,
+                updated_at_src   TIMESTAMPTZ,
+                loaded_at        TIMESTAMPTZ DEFAULT NOW(),
+                updated_at       TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_upya_agents_entity
+                ON silver.upya_agents(entity_name);
+        """,
+        "upsert_sql": """
+            INSERT INTO silver.upya_agents (
+                agent_number, internal_number, first_name, last_name,
+                gender, mobile, email, role, entity_name,
+                country, country_code, updated_at_src
+            ) VALUES %s
+            ON CONFLICT (agent_number) DO UPDATE SET
+                first_name     = EXCLUDED.first_name,
+                last_name      = EXCLUDED.last_name,
+                gender         = EXCLUDED.gender,
+                mobile         = EXCLUDED.mobile,
+                email          = EXCLUDED.email,
+                role           = EXCLUDED.role,
+                entity_name    = EXCLUDED.entity_name,
+                updated_at_src = EXCLUDED.updated_at_src,
+                updated_at     = NOW();
+        """,
+        "transform": lambda item: _transform_agent(item),
     },
 }
 
@@ -234,6 +276,29 @@ def _transform_deal(item):
     )
 
 
+def _transform_agent(item):
+    agent_number = item.get("agentNumber")
+    if not agent_number:
+        return None
+    profile = item.get("profile") or {}
+    contact = item.get("contact") or {}
+    entity  = item.get("entity")  or {}
+    return (
+        str(agent_number),
+        item.get("internalNumber"),
+        profile.get("firstName"),
+        profile.get("lastName"),
+        profile.get("gender"),
+        str(contact.get("mobile")) if contact.get("mobile") else None,
+        contact.get("email") or item.get("email"),
+        item.get("role"),
+        entity.get("name"),
+        item.get("country"),
+        item.get("countryCode"),
+        _parse_date(item.get("updatedAt")),
+    )
+
+
 def load_entity(entity_name, date=None):
     load_dotenv()
     start_time = time.time()
@@ -257,8 +322,6 @@ def load_entity(entity_name, date=None):
     cur.close()
     logger.info(f"Table silver.upya_{entity_name} prête")
 
-    # Watermark : ne relit que les fichiers non encore traites avec succes,
-    # sauf appel explicite avec une date precise (rejeu manuel d'un jour donne)
     since = date if date else get_load_watermark(conn, "upya", entity_name)
     files = list_bronze_files(minio_client, bucket, "upya", entity_name, since_date=since)
 
