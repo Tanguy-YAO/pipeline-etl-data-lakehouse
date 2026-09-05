@@ -13,12 +13,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: master
+
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install dependencies
         run: pip install -r requirements.txt
+
       - name: Create .env file
         run: |
           echo "DB_HOST=${{ secrets.DB_HOST }}" >> .env
@@ -39,30 +42,57 @@ jobs:
           echo "GOOGLE_APPLICATION_CREDENTIALS=config/google_credentials.json" >> .env
           echo "GS_LOCATIONS_ID=${{ secrets.GS_LOCATIONS_ID }}" >> .env
           echo "GS_LOCATIONS_WS=liste" >> .env
+
       - name: Create Google credentials file
         run: |
           mkdir -p config
           echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > config/google_credentials.json
+
       - name: Bronze - Extraction contracts UPYA
         run: python bronze/upya/generic_extractor.py contracts
+
       - name: Bronze - Extraction payments UPYA
         run: python bronze/upya/generic_extractor.py payments
+
       - name: Bronze - Extraction assets UPYA
         run: python bronze/upya/generic_extractor.py assets
+
       - name: Bronze - Extraction clients UPYA
         run: python bronze/upya/generic_extractor.py clients
+
+      - name: Bronze - Extraction agents UPYA
+        run: python bronze/upya/generic_extractor.py agents
+
+      - name: Bronze - Extraction deals UPYA
+        run: python bronze/upya/generic_extractor.py deals
+
       - name: Silver - Chargement contracts UPYA
         run: python silver/upya/contracts_loader.py
+
       - name: Silver - Chargement payments UPYA
         run: python silver/upya/payments_loader.py
+
       - name: Silver - Chargement assets UPYA
         run: python silver/upya/generic_loader.py assets
+
       - name: Silver - Chargement clients UPYA
         run: python silver/upya/generic_loader.py clients
+
+      - name: Silver - Chargement agents UPYA
+        run: python silver/upya/generic_loader.py agents
+
+      - name: Silver - Chargement deals UPYA
+        run: python silver/upya/generic_loader.py deals
+
       - name: Silver - Chargement locations (Google Sheets)
         run: python locations_upsert_etl.py
+
       - name: Gold - Snapshot quotidien
         run: python gold/snapshot_builder.py
+
+      - name: Gold - Construction unified_transactions
+        run: python gold/unified_transactions_builder.py
+
       - name: Statut pipeline
         if: always()
         run: |

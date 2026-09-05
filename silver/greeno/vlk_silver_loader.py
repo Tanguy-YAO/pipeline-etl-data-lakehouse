@@ -1,28 +1,13 @@
 # silver/greeno/vlk_silver_loader.py
-#
-# Loader générique pour les 18 vues vlk_ GREENO : lit chaque table
-# bronze.greeno_vlk_* (créée par bronze/greeno/vlk_views_extractor.py)
-
-# APPROCHE : les colonnes sont découvertes dynamiquement via
-# information_schema plutot car on ne connait pas encore
-# le détail exact des 18 vues, et cette approche s'adapte automatiquement
-# si GREENO modifie une vue cote source. Je verrai avec Lucien si des modifications fréquentes sont à prévoir, auquel cas on pourra passer à une approche plus statique (liste de colonnes codée en dur).
-#
-# NETTOYAGE APPLIQUE (toutes tables) :
-#   - Chaine vide -> NULL
-#   - Espaces en debut/fin retires (TRIM)
-#   - Valeur littérale "Error" -> NULL (anomalie connue sur lib_localite,
-#     potentiellement présente ailleurs)
-#
-# LIMITE CONNUE : id_prospect_appsheet (vlk_prospect_tlc) est stocke comme
-# texte de representation Python d'une liste (ex: "['b1e1c8e4']"), pas
-# comme un vrai tableau SQL -- laisse tel quel pour l'instant, a traiter
-# specifiquement si besoin d'exploiter cette colonne.
-
 import os
+import sys
 import logging
+import time
 import psycopg2
 from dotenv import load_dotenv
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+from database.db_client import get_db_connection, init_schemas, init_run_log, log_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,14 +21,6 @@ VLK_VIEWS = [
     "vlk_sav_req_fermees", "vlk_sav_req_ouvertes", "vlk_sites_evalues_tlc",
     "vlk_spatial_client_installe", "vlk_suivi_client_tlc", "vlk_sup_vente"
 ]
-
-
-def get_conn():
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST"), port=int(os.getenv("DB_PORT") or 5432),
-        dbname=os.getenv("DB_NAME"), user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"), sslmode="require", connect_timeout=60
-    )
 
 
 def get_columns(conn, table_name):
@@ -68,11 +45,8 @@ def sync_vlk_view(conn, view_name):
         logger.warning(f"{view_name}: aucune colonne trouvee dans bronze.{bronze_table} -- ignoree")
         return 0
 
-    cols_sql = ", ".join([f'"{c}"' for c in columns])
-    # Nettoyage universel : chaine vide -> NULL, "Error" litteral -> NULL,
-    # espaces en trop retires
     clean_cols_sql = ", ".join([
-        f"""NULLIF(NULLIF(TRIM("{c}"), ''), 'Error') AS "{c}\"""" for c in columns
+        f"""NULLIF(NULLIF(TRIM("{c}"), ''), 'Error') AS "{c}" """ for c in columns
     ])
 
     cur = conn.cursor()
@@ -94,20 +68,46 @@ def sync_vlk_view(conn, view_name):
 
 
 def main():
-    conn = get_conn()
+    conn     = get_db_connection()
+    conn_log = get_db_connection()
+    init_schemas(conn_log)
+    init_run_log(conn_log)
+
     total = 0
     logger.info("=" * 50)
     logger.info(f"SILVER GREENO - chargement des {len(VLK_VIEWS)} vues vlk_")
     logger.info("=" * 50)
 
     for view in VLK_VIEWS:
+        start = time.time()
         try:
-            total += sync_vlk_view(conn, view)
+            count = sync_vlk_view(conn, view)
+            total += count
+            log_run(
+                conn=conn_log,
+                source="greeno",
+                entity=view,
+                status="success",
+                rows_count=count,
+                minio_prefix=None,
+                duration_sec=time.time() - start,
+            )
         except Exception as e:
             logger.error(f"Erreur sur {view}: {e}")
             conn.rollback()
+            log_run(
+                conn=conn_log,
+                source="greeno",
+                entity=view,
+                status="error",
+                rows_count=0,
+                error_message=str(e),
+                duration_sec=time.time() - start,
+            )
 
     conn.close()
+    conn_log.close()
+
     logger.info("=" * 50)
     logger.info(f"TERMINE — {total:,} lignes au total")
     logger.info("=" * 50)
