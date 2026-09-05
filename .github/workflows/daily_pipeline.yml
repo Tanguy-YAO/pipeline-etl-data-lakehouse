@@ -90,9 +90,6 @@ jobs:
       - name: Gold - Snapshot quotidien
         run: python gold/snapshot_builder.py
 
-      - name: Gold - Construction unified_transactions
-        run: python gold/unified_transactions_builder.py
-
       - name: Statut pipeline
         if: always()
         run: |
