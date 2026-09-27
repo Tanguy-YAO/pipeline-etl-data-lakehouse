@@ -3,22 +3,23 @@
 # RÔLE : Loader générique pour les entités UPYA simples.
 # Lit les JSON Bronze MinIO et charge dans PostgreSQL Silver.
 #
-# CORRECTIF (21/08/2026) : watermark Silver ajoute -- ne relit plus
-# TOUT l'historique Bronze a chaque run (cause du timeout de 90min
+# CORRECTIF (21/08/2026) : watermark Silver ajouté -- ne relit plus
+# TOUT l'historique Bronze à chaque run (cause du timeout de 90min
 # sur assets le 21/08/2026), seulement les fichiers non encore
-# traites avec succes. Voir silver_meta.load_watermark.
+# traités avec succès. Voir silver_meta.load_watermark.
 #
 # CORRECTIF (28/08/2026) : deploy_date et date_added manquaient dans
 # le ON CONFLICT DO UPDATE de assets -- un asset extrait AVANT son
-# deploiement physique (deploy_date=NULL a ce moment) restait bloque
-# a NULL pour toujours, meme une fois reellement deploye et remonte
-# avec la vraie date lors d'une extraction ulterieure. Cause directe
-# du faible taux de remplissage de deploy_date (37,9% observe) et de
-# la sous-estimation des activations recentes dans les dashboards.
-# Necessite un rechargement complet apres deploiement (watermark reset)
-# pour reparer l'historique deja fige en base par ce bug.
+# déploiement physique (deploy_date=NULL à ce moment) restait bloqué
+# à NULL pour toujours, même une fois réellement déployé et remonté
+# avec la vraie date lors d'une extraction ultérieure. Cause directe
+# du faible taux de remplissage de deploy_date (37,9% observé) et de
+# la sous-estimation des activations récentes dans les dashboards.
+# Nécessite un rechargement complet après déploiement (watermark reset)
+# pour réparer l'historique déjà figé en base par ce bug.
 #
-# CORRECTIF (05/09/2026) : ajout entite agents
+# CORRECTIF (05/09/2026) : ajout entité agents
+# CORRECTIF (27/09/2026) : ajout entités tasks et forms
 
 import os
 import sys
@@ -188,8 +189,126 @@ ENTITIES = {
         """,
         "transform": lambda item: _transform_agent(item),
     },
+    "tasks": {
+        "create_sql": """
+            CREATE TABLE IF NOT EXISTS silver.upya_tasks (
+                task_id               TEXT PRIMARY KEY,
+                task_number           TEXT,
+                title                 TEXT,
+                instructions          TEXT,
+                assigned_on           TIMESTAMPTZ,
+                due_on                TIMESTAMPTZ,
+                completed_on          TIMESTAMPTZ,
+                closed_on             TIMESTAMPTZ,
+                assigned_to           TEXT,
+                assigned_to_last_name TEXT,
+                contract_number       TEXT,
+                client_number         TEXT,
+                parent_ticket         TEXT,
+                updated_at_src        TIMESTAMPTZ,
+                loaded_at             TIMESTAMPTZ DEFAULT NOW(),
+                updated_at            TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_upya_tasks_contract
+                ON silver.upya_tasks(contract_number);
+            CREATE INDEX IF NOT EXISTS idx_upya_tasks_client
+                ON silver.upya_tasks(client_number);
+        """,
+        "upsert_sql": """
+            INSERT INTO silver.upya_tasks (
+                task_id, task_number, title, instructions,
+                assigned_on, due_on, completed_on, closed_on,
+                assigned_to, assigned_to_last_name,
+                contract_number, client_number,
+                parent_ticket, updated_at_src
+            ) VALUES %s
+            ON CONFLICT (task_id) DO UPDATE SET
+                title                 = EXCLUDED.title,
+                completed_on          = EXCLUDED.completed_on,
+                closed_on             = EXCLUDED.closed_on,
+                assigned_to           = EXCLUDED.assigned_to,
+                updated_at_src        = EXCLUDED.updated_at_src,
+                updated_at            = NOW();
+        """,
+        "transform": lambda item: _transform_task(item),
+    },
+    "forms": {
+        "create_sql": """
+            CREATE TABLE IF NOT EXISTS silver.upya_forms (
+                form_id            TEXT PRIMARY KEY,
+                questionnaire_name TEXT,
+                contract_number    TEXT,
+                client_number      TEXT,
+                collector_number   TEXT,
+                collector_name     TEXT,
+                credit_agent_ref   TEXT,
+                survey             BOOLEAN,
+                paid               BOOLEAN,
+                form_date          TIMESTAMPTZ,
+                created_at_src     TIMESTAMPTZ,
+                updated_at_src     TIMESTAMPTZ,
+                raw_data           JSONB,
+                loaded_at          TIMESTAMPTZ DEFAULT NOW(),
+                updated_at         TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_upya_forms_contract
+                ON silver.upya_forms(contract_number);
+            CREATE INDEX IF NOT EXISTS idx_upya_forms_client
+                ON silver.upya_forms(client_number);
+            CREATE INDEX IF NOT EXISTS idx_upya_forms_date
+                ON silver.upya_forms(form_date);
+        """,
+        "upsert_sql": """
+            INSERT INTO silver.upya_forms (
+                form_id, questionnaire_name, contract_number,
+                client_number, collector_number, collector_name,
+                credit_agent_ref, survey, paid, form_date,
+                created_at_src, updated_at_src, raw_data
+            ) VALUES %s
+            ON CONFLICT (form_id) DO UPDATE SET
+                questionnaire_name = EXCLUDED.questionnaire_name,
+                updated_at_src     = EXCLUDED.updated_at_src,
+                raw_data           = EXCLUDED.raw_data,
+                updated_at         = NOW();
+        """,
+        "transform": lambda item: _transform_form(item),
+    },
+    "tickets": {
+        "create_sql": """
+            CREATE TABLE IF NOT EXISTS silver.upya_tickets (
+                ticket_id         TEXT PRIMARY KEY,
+                ticket_number     TEXT,
+                status            TEXT,
+                progress          TEXT,
+                title             TEXT,
+                contract_number   TEXT,
+                client_number     TEXT,
+                origin            TEXT,
+                created_at_src    TIMESTAMPTZ,
+                updated_at_src    TIMESTAMPTZ,
+                loaded_at         TIMESTAMPTZ DEFAULT NOW(),
+                updated_at        TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_upya_tickets_contract
+                ON silver.upya_tickets(contract_number);
+            CREATE INDEX IF NOT EXISTS idx_upya_tickets_client
+                ON silver.upya_tickets(client_number);
+        """,
+        "upsert_sql": """
+            INSERT INTO silver.upya_tickets (
+                ticket_id, ticket_number, status, progress, title,
+                contract_number, client_number, origin,
+                created_at_src, updated_at_src
+            ) VALUES %s
+            ON CONFLICT (ticket_id) DO UPDATE SET
+                status         = EXCLUDED.status,
+                progress       = EXCLUDED.progress,
+                updated_at_src = EXCLUDED.updated_at_src,
+                updated_at     = NOW();
+        """,
+        "transform": lambda item: _transform_ticket(item),
+    },
 }
-
 
 def _parse_date(v):
     if not v:
@@ -201,6 +320,17 @@ def _parse_date(v):
         except ValueError:
             continue
     return None
+
+
+def _parse_date_task(v):
+    """Parse le format spécifique des dates dans upya_tasks : '12-Jun-2025 02:39:42'"""
+    if not v:
+        return None
+    from datetime import datetime, timezone
+    try:
+        return datetime.strptime(v, "%d-%b-%Y %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def _parse_amount(v):
@@ -299,6 +429,71 @@ def _transform_agent(item):
     )
 
 
+def _transform_task(item):
+    task_id = item.get("taskId")
+    if not task_id:
+        return None
+    return (
+        str(task_id),
+        item.get("taskNumber"),
+        item.get("title"),
+        item.get("instructions"),
+        _parse_date_task(item.get("assignedOn")),
+        _parse_date_task(item.get("dueOn")),
+        _parse_date_task(item.get("completedOn")),
+        _parse_date_task(item.get("closedOn")),
+        item.get("assignedTo"),
+        item.get("assignedToLastName"),
+        item.get("contractNumber"),
+        item.get("clientNumber"),
+        item.get("parentTicket"),
+        _parse_date(item.get("updatedAt")),
+    )
+
+
+def _transform_form(item):
+    form_id = item.get("_id")
+    if not form_id:
+        return None
+    questionnaire     = item.get("questionnaire") or {}
+    collector         = item.get("collector")     or {}
+    collector_profile = collector.get("profile")  or {}
+    contract          = item.get("contract")      or {}
+    client            = item.get("client")        or {}
+    collector_name    = f"{collector_profile.get('firstName', '')} {collector_profile.get('lastName', '')}".strip() or None
+    return (
+        str(form_id),
+        questionnaire.get("name"),
+        contract.get("contractNumber"),
+        client.get("clientNumber"),
+        collector.get("userNumber"),
+        collector_name,
+        item.get("creditAgentReference"),
+        bool(item.get("survey", False)),
+        bool(item.get("paid", False)),
+        _parse_date(item.get("date")),
+        _parse_date(item.get("createdAt")),
+        _parse_date(item.get("updatedAt")),
+        json.dumps(item.get("creditItems", []), ensure_ascii=False),
+    )
+
+def _transform_ticket(item):
+    ticket_id = item.get("ticketId")
+    if not ticket_id:
+        return None
+    return (
+        str(ticket_id),
+        item.get("ticketNumber"),
+        item.get("status"),
+        item.get("progress"),
+        item.get("title"),
+        item.get("contractNumber"),
+        item.get("clientNumber"),
+        item.get("origin"),
+        _parse_date(item.get("createdAt")),
+        _parse_date(item.get("updatedAt")),
+    )
+
 def load_entity(entity_name, date=None):
     load_dotenv()
     start_time = time.time()
@@ -307,9 +502,7 @@ def load_entity(entity_name, date=None):
     if not config:
         raise ValueError(f"Entité inconnue : {entity_name}")
 
-    logger.info("=" * 50)
     logger.info(f"SILVER LOADER — UPYA {entity_name.upper()}")
-    logger.info("=" * 50)
 
     minio_client = get_minio_client()
     bucket       = os.getenv("MINIO_BUCKET", "paygo-lakehouse")
@@ -351,7 +544,8 @@ def load_entity(entity_name, date=None):
 
             if rows:
                 cur = conn.cursor()
-                execute_values(cur, config["upsert_sql"], rows, page_size=500)
+                page_size = 100 if entity_name == "forms" else 500
+                execute_values(cur, config["upsert_sql"], rows, page_size=page_size)
                 conn.commit()
                 cur.close()
                 total_rows += len(rows)
@@ -374,12 +568,7 @@ def load_entity(entity_name, date=None):
         logger.warning(f"{total_errors} erreur(s) — watermark {entity_name} non avancé, retraité au prochain run")
 
     duration = time.time() - start_time
-    logger.info("=" * 50)
-    logger.info(f"✅ {entity_name.upper()} TERMINÉ")
-    logger.info(f"   Lignes  : {total_rows:,}")
-    logger.info(f"   Erreurs : {total_errors}")
-    logger.info(f"   Durée   : {duration:.1f}s")
-    logger.info("=" * 50)
+    logger.info(f"TERMINE — {entity_name.upper()} : {total_rows:,} lignes / {total_errors} erreurs / {duration:.1f}s")
 
     conn.close()
     return total_rows
