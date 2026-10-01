@@ -1,9 +1,12 @@
 -- gold/unified_contracts.sql
 -- VUE UNIFIÉE — Contrats UPYA (TEVIA + GREENO) + SURGE
 --
--- v11 :
---   - source et entite normalisés en minuscules
---   - phone_number ajouté (upya_clients.mobile + surge_legacy_contacts.prim_mobile)
+-- v12 :
+--   - sale_status ajouté : signed / approved / pending / rejected / cancelled
+--   - filtre signing_date IS NOT NULL retiré : tous les statuts UPYA remontent
+--   - paid_date = NULL pour les contrats non encore signés (Pending, Approved…)
+--   - pour SURGE : sale_status = 'signed' (tous contrats finalisés)
+--   - colonne ajoutée EN FIN de SELECT pour préserver les vues dépendantes
 
 CREATE OR REPLACE VIEW gold.unified_contracts AS
 WITH
@@ -66,7 +69,7 @@ upya AS (
         c.customer_name,
         c.agent_number,
         c.agent_name,
-        c.signing_date                          AS paid_date,
+        c.signing_date                          AS paid_date,      -- NULL si non Signed
         a.deploy_date                           AS registration_date,
         c.last_status_update,
         c.next_status_update,
@@ -87,7 +90,8 @@ upya AS (
         c.village,
         c.latitude,
         c.longitude,
-        cl.mobile                               AS phone_number
+        cl.mobile                               AS phone_number,
+        c.onboarding_status                     AS sale_status_raw  -- v12
     FROM silver.upya_contracts c
     LEFT JOIN upya_assets_latest a
         ON a.contract_number = c.contract_number
@@ -95,7 +99,7 @@ upya AS (
         ON cl.client_number = c.client_number
     WHERE c.contract_number IS NOT NULL
       AND TRIM(c.contract_number) != ''
-      AND c.signing_date IS NOT NULL
+      -- signing_date IS NOT NULL retiré en v12 : Pending/Approved/Rejected/Cancelled inclus
 ),
 surge AS (
     SELECT
@@ -142,7 +146,8 @@ surge AS (
         NULL::TEXT                              AS village,
         s.latitude,
         s.longitude,
-        slc.prim_mobile                         AS phone_number
+        slc.prim_mobile                         AS phone_number,
+        'signed'::TEXT                          AS sale_status_raw  -- v12 : SURGE = toujours signed
     FROM silver.surge_contracts s
     LEFT JOIN surge_financials sf
         ON sf.installation_id = s.installation_id
@@ -186,7 +191,15 @@ normalized AS (
             WHEN UPPER(TRIM(deal_type_raw)) IN ('NO', 'PAYG')  THEN 'PAYG'
             WHEN UPPER(TRIM(deal_type_raw)) IN ('YES', 'FULL') THEN 'FULL'
             ELSE 'PAYG'
-        END AS deal_type
+        END AS deal_type,
+        CASE LOWER(TRIM(sale_status_raw))         -- v12
+            WHEN 'signed'    THEN 'signed'
+            WHEN 'approved'  THEN 'approved'
+            WHEN 'pending'   THEN 'pending'
+            WHEN 'rejected'  THEN 'rejected'
+            WHEN 'cancelled' THEN 'cancelled'
+            ELSE LOWER(TRIM(sale_status_raw))
+        END AS sale_status
     FROM unified_raw
 )
 SELECT
@@ -236,17 +249,20 @@ SELECT
             )
         ELSE NULL
     END AS consecutive_locked_days,
-    CURRENT_TIMESTAMP AS computed_at
+    CURRENT_TIMESTAMP AS computed_at,
+    sale_status                                 -- v12 : en fin de SELECT (dépendances préservées)
 FROM normalized;
 
 COMMENT ON VIEW gold.unified_contracts IS
-'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v11.
-entite       : tevia ou greeno (entreprise propriétaire)
-source       : upya ou surge (origine technique)
-categorie    : upya_tevia / upya_greeno / surge_tevia / surge_neotci / surge_zeci
-phone_number : mobile UPYA (upya_clients) / mobile primaire SURGE (surge_legacy_contacts)
-latitude     : GPS client UPYA (profile.gps) / SURGE (natif)
-longitude    : GPS client UPYA (profile.gps) / SURGE (natif)
-paid_off     : surge_paidoff pour SURGE / upya_contracts pour UPYA
-repossession : upya_contracts.repossession_date / surge_contracts.removed_at
-registration : deploy_date UPYA / activated_at SURGE';
+'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v12.
+entite         : tevia ou greeno (entreprise propriétaire)
+source         : upya ou surge (origine technique)
+categorie      : upya_tevia / upya_greeno / surge_tevia / surge_neotci / surge_zeci
+sale_status    : signed / approved / pending / rejected / cancelled
+                 Filtrer sale_status = signed pour aligner sur export CRM.
+                 SURGE = toujours signed. Colonne ajoutée en fin (dépendances inchangées).
+paid_date      : signing_date UPYA (NULL si non Signed) / paid_at SURGE
+phone_number   : mobile UPYA (upya_clients) / mobile primaire SURGE (surge_legacy_contacts)
+paid_off       : surge_paidoff pour SURGE / upya_contracts pour UPYA
+repossession   : upya_contracts.repossession_date / surge_contracts.removed_at
+registration   : deploy_date UPYA / activated_at SURGE';
