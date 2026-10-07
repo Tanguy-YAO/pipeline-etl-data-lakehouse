@@ -1,12 +1,9 @@
 -- gold/unified_contracts.sql
 -- VUE UNIFIÉE — Contrats UPYA (TEVIA + GREENO) + SURGE
 --
--- v12 :
---   - sale_status ajouté : signed / approved / pending / rejected / cancelled
---   - filtre signing_date IS NOT NULL retiré : tous les statuts UPYA remontent
---   - paid_date = NULL pour les contrats non encore signés (Pending, Approved…)
---   - pour SURGE : sale_status = 'signed' (tous contrats finalisés)
---   - colonne ajoutée EN FIN de SELECT pour préserver les vues dépendantes
+-- v13 :
+--   - computed_at : remplace CURRENT_TIMESTAMP par le dernier run pipeline réussi
+--     (bronze_meta.run_log WHERE status = 'success')
 
 CREATE OR REPLACE VIEW gold.unified_contracts AS
 WITH
@@ -15,26 +12,26 @@ neotci AS (
 ),
 surge_financials AS (
     SELECT
-        m.installation_id::text      AS installation_id,
-        SUM(p.amount)                AS total_paid,
-        MAX(p.paid_time)             AS last_payment_date
+        m.installation_id,
+        SUM(p.amount)         AS total_paid,
+        MAX(p.paid_time)      AS last_payment_date
     FROM silver.surge_payments p
     JOIN silver.surge_asset_mapping m ON p.account = m.asset_number
     WHERE p.payment_status != 'REVERSED'
-    GROUP BY m.installation_id::text
+    GROUP BY m.installation_id
     UNION ALL
     SELECT
-        le.installation_id::text     AS installation_id,
+        le.installation_id,
         SUM(le.total_cash_collected) AS total_paid,
         MAX(le.posting_date)         AS last_payment_date
     FROM silver.surge_lease_engine le
-    WHERE le.installation_id::text NOT IN (
-        SELECT DISTINCT m.installation_id::text
+    WHERE le.installation_id NOT IN (
+        SELECT DISTINCT m.installation_id
         FROM silver.surge_payments p
         JOIN silver.surge_asset_mapping m ON p.account = m.asset_number
         WHERE p.payment_status != 'REVERSED'
     )
-    GROUP BY le.installation_id::text
+    GROUP BY le.installation_id
 ),
 surge_paidoff_lookup AS (
     SELECT contract_number, paid_off_date
@@ -60,7 +57,7 @@ upya AS (
             WHEN c.entity_name = 'GREENO' THEN 'greeno'
             ELSE 'tevia'
         END                                     AS entite,
-        'upya'                                  AS source,
+        'upya'::TEXT                            AS source,
         CASE
             WHEN c.entity_name = 'GREENO' THEN 'upya_greeno'
             ELSE 'upya_tevia'
@@ -69,7 +66,7 @@ upya AS (
         c.customer_name,
         c.agent_number,
         c.agent_name,
-        c.signing_date                          AS paid_date,      -- NULL si non Signed
+        c.signing_date                          AS paid_date,
         a.deploy_date                           AS registration_date,
         c.last_status_update,
         c.next_status_update,
@@ -91,23 +88,21 @@ upya AS (
         c.latitude,
         c.longitude,
         cl.mobile                               AS phone_number,
-        c.onboarding_status                     AS sale_status_raw  -- v12
+        NULL::TEXT                              AS phone_number_2
     FROM silver.upya_contracts c
-    LEFT JOIN upya_assets_latest a
-        ON a.contract_number = c.contract_number
-    LEFT JOIN silver.upya_clients cl
-        ON cl.client_number = c.client_number
+    LEFT JOIN upya_assets_latest a ON a.contract_number = c.contract_number
+    LEFT JOIN silver.upya_clients cl ON cl.client_number = c.client_number
     WHERE c.contract_number IS NOT NULL
       AND TRIM(c.contract_number) != ''
-      -- signing_date IS NOT NULL retiré en v12 : Pending/Approved/Rejected/Cancelled inclus
+      AND c.signing_date IS NOT NULL
 ),
 surge AS (
     SELECT
-        s.installation_id::TEXT                 AS contract_number,
-        'tevia'                                 AS entite,
-        'surge'                                 AS source,
+        s.installation_id                       AS contract_number,
+        'tevia'::TEXT                           AS entite,
+        'surge'::TEXT                           AS source,
         CASE
-            WHEN s.installation_id::TEXT IN (SELECT contract_number FROM neotci)
+            WHEN s.installation_id IN (SELECT contract_number FROM neotci)
                 THEN 'surge_neotci'
             WHEN s.paid_at >= '2024-04-01'
                 THEN 'surge_tevia'
@@ -123,7 +118,7 @@ surge AS (
         s.unlocked_until::TIMESTAMPTZ           AS next_status_update,
         sp.paid_off_date::TIMESTAMPTZ           AS paid_off_date,
         s.removed_at::TIMESTAMPTZ               AS repossession_date,
-        m.asset_number::TEXT                    AS asset_number,
+        m.asset_number,
         COALESCE(pl.deal_type, 'PAYG')          AS deal_type_raw,
         pl.total_contract_value,
         pl.upfront_payment,
@@ -131,8 +126,7 @@ surge AS (
         COALESCE(sf.total_paid, 0)              AS total_paid,
         CASE
             WHEN pl.total_contract_value IS NOT NULL
-            THEN GREATEST(0, pl.total_contract_value
-                 - COALESCE(sf.total_paid, 0))
+            THEN GREATEST(0, pl.total_contract_value - COALESCE(sf.total_paid, 0))
             ELSE NULL
         END                                     AS remaining_debt,
         s.status                                AS contract_status_raw,
@@ -147,18 +141,13 @@ surge AS (
         s.latitude,
         s.longitude,
         slc.prim_mobile                         AS phone_number,
-        'signed'::TEXT                          AS sale_status_raw  -- v12 : SURGE = toujours signed
+        slc.snd_mobile                          AS phone_number_2
     FROM silver.surge_contracts s
-    LEFT JOIN surge_financials sf
-        ON sf.installation_id = s.installation_id
-    LEFT JOIN silver.surge_product_lookup pl
-        ON pl.installation_id = s.installation_id::TEXT
-    LEFT JOIN surge_paidoff_lookup sp
-        ON sp.contract_number = s.installation_id::TEXT
-    LEFT JOIN silver.surge_asset_mapping m
-        ON m.installation_id = s.installation_id
-    LEFT JOIN silver.surge_legacy_contacts slc
-        ON slc.contract_number = s.installation_id::TEXT
+    LEFT JOIN surge_financials sf     ON sf.installation_id = s.installation_id
+    LEFT JOIN silver.surge_product_lookup pl ON pl.installation_id = s.installation_id
+    LEFT JOIN surge_paidoff_lookup sp ON sp.contract_number = s.installation_id
+    LEFT JOIN silver.surge_asset_mapping m ON m.installation_id = s.installation_id
+    LEFT JOIN silver.surge_legacy_contacts slc ON slc.contract_number = s.installation_id
 ),
 unified_raw AS (
     SELECT * FROM upya
@@ -171,35 +160,27 @@ normalized AS (
         CASE
             WHEN paid_off_date IS NOT NULL AND source = 'surge'
                 THEN 'PAID_OFF'
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('ACTIVE', 'ENABLED', 'AWAITING REMOVAL')
+            WHEN UPPER(TRIM(contract_status_raw)) = ANY(ARRAY['ACTIVE','ENABLED','AWAITING REMOVAL'])
                 THEN 'ENABLED'
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('DISABLED', 'REPOSSESSED')
+            WHEN UPPER(TRIM(contract_status_raw)) = ANY(ARRAY['DISABLED','REPOSSESSED'])
                 THEN 'REPOSSESSED'
             WHEN UPPER(TRIM(contract_status_raw)) = 'LOCKED'
                 THEN 'LOCKED'
-            WHEN UPPER(TRIM(contract_status_raw)) IN ('PAID_OFF', 'PAIDOFF')
+            WHEN UPPER(TRIM(contract_status_raw)) = ANY(ARRAY['PAID_OFF','PAIDOFF'])
                 THEN 'PAID_OFF'
             WHEN UPPER(TRIM(contract_status_raw)) = 'CANCELLED'
                 THEN 'CANCELLED'
             ELSE UPPER(TRIM(contract_status_raw))
         END AS contract_status,
         CASE
-            WHEN LOWER(TRIM(paid_off_raw)) IN ('yes', 'true', '1') THEN 'true'
+            WHEN LOWER(TRIM(paid_off_raw)) = ANY(ARRAY['yes','true','1']) THEN 'true'
             ELSE 'false'
         END AS paid_off,
         CASE
-            WHEN UPPER(TRIM(deal_type_raw)) IN ('NO', 'PAYG')  THEN 'PAYG'
-            WHEN UPPER(TRIM(deal_type_raw)) IN ('YES', 'FULL') THEN 'FULL'
+            WHEN UPPER(TRIM(deal_type_raw)) = ANY(ARRAY['NO','PAYG'])  THEN 'PAYG'
+            WHEN UPPER(TRIM(deal_type_raw)) = ANY(ARRAY['YES','FULL']) THEN 'FULL'
             ELSE 'PAYG'
-        END AS deal_type,
-        CASE LOWER(TRIM(sale_status_raw))         -- v12
-            WHEN 'signed'    THEN 'signed'
-            WHEN 'approved'  THEN 'approved'
-            WHEN 'pending'   THEN 'pending'
-            WHEN 'rejected'  THEN 'rejected'
-            WHEN 'cancelled' THEN 'cancelled'
-            ELSE LOWER(TRIM(sale_status_raw))
-        END AS sale_status
+        END AS deal_type
     FROM unified_raw
 )
 SELECT
@@ -209,7 +190,6 @@ SELECT
     categorie,
     client_number,
     customer_name,
-    phone_number,
     agent_number,
     agent_name,
     paid_date,
@@ -234,10 +214,10 @@ SELECT
     latitude,
     longitude,
     CASE
-        WHEN deal_type = 'FULL'                 THEN NULL
-        WHEN contract_status = 'REPOSSESSED'    THEN NULL
-        WHEN contract_status = 'CANCELLED'      THEN NULL
-        WHEN paid_off = 'true'                  THEN NULL
+        WHEN deal_type = 'FULL'              THEN NULL::INTEGER
+        WHEN contract_status = 'REPOSSESSED' THEN NULL::INTEGER
+        WHEN contract_status = 'CANCELLED'   THEN NULL::INTEGER
+        WHEN paid_off = 'true'               THEN NULL::INTEGER
         WHEN next_status_update IS NOT NULL THEN
             GREATEST(0,
                 FLOOR(
@@ -247,22 +227,28 @@ SELECT
                     ) / 86400
                 )::INTEGER
             )
-        ELSE NULL
+        ELSE NULL::INTEGER
     END AS consecutive_locked_days,
-    CURRENT_TIMESTAMP AS computed_at,
-    sale_status                                 -- v12 : en fin de SELECT (dépendances préservées)
+    (
+        SELECT MAX(run_at)
+        FROM bronze_meta.run_log
+        WHERE status = 'success'
+          AND entity IN (
+              'contracts', 'clients', 'assets',
+              'contracts', 'payments'
+          )
+    ) AS computed_at,
+    phone_number,
+    phone_number_2
 FROM normalized;
 
 COMMENT ON VIEW gold.unified_contracts IS
-'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v12.
-entite         : tevia ou greeno (entreprise propriétaire)
-source         : upya ou surge (origine technique)
-categorie      : upya_tevia / upya_greeno / surge_tevia / surge_neotci / surge_zeci
-sale_status    : signed / approved / pending / rejected / cancelled
-                 Filtrer sale_status = signed pour aligner sur export CRM.
-                 SURGE = toujours signed. Colonne ajoutée en fin (dépendances inchangées).
-paid_date      : signing_date UPYA (NULL si non Signed) / paid_at SURGE
-phone_number   : mobile UPYA (upya_clients) / mobile primaire SURGE (surge_legacy_contacts)
+'Vue unifiée TEVIA + GREENO (UPYA) + SURGE v13.
+computed_at    : horodatage du dernier run pipeline réussi (bronze_meta.run_log),
+                 non de la requête sur la vue.
+agent_number   : UPYA uniquement (NULL pour SURGE)
+phone_number   : mobile primaire UPYA / prim_mobile SURGE
+phone_number_2 : NULL pour UPYA / snd_mobile SURGE
 paid_off       : surge_paidoff pour SURGE / upya_contracts pour UPYA
 repossession   : upya_contracts.repossession_date / surge_contracts.removed_at
 registration   : deploy_date UPYA / activated_at SURGE';
