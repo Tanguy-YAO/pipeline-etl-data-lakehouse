@@ -1,7 +1,7 @@
 name: Pipeline Quotidien TEVIA & GREENO
 on:
   schedule:
-    - cron: '30 3 * * *'
+    - cron: '30 2 * * *'
   workflow_dispatch:
 jobs:
   pipeline:
@@ -87,8 +87,8 @@ jobs:
       - name: Silver - Chargement locations (Google Sheets)
         run: python locations_upsert_etl.py
 
-      - name: Gold - Snapshot quotidien
-        run: python gold/snapshot_builder.py
+      - name: Gold - Snapshot quotidien unified_contracts
+        run: python gold/snapshot_daily_contracts.py
 
       - name: Statut pipeline
         if: always()
