@@ -87,6 +87,30 @@ jobs:
       - name: Silver - Chargement locations (Google Sheets)
         run: python locations_upsert_etl.py
 
+      # Rafraîchit la vue matérialisée de l'app de recouvrement (AppSheet).
+      # Placé juste après le dernier chargement Silver : gold.unified_contracts
+      # et gold.unified_transactions lisent Silver, elles sont donc à jour ici.
+      # Placé AVANT le snapshot : si le snapshot échoue, l'app reçoit quand
+      # même les données du jour.
+      - name: Recouvrement - Rafraichissement mv_contrats
+        run: |
+          python -c "
+          import sys, time
+          sys.path.append('.')
+          from dotenv import load_dotenv
+          from database.db_client import get_db_connection
+          load_dotenv()
+          debut = time.time()
+          conn = get_db_connection()
+          conn.autocommit = True
+          cur = conn.cursor()
+          cur.execute('SELECT recouvrement.rafraichir();')
+          cur.execute('SELECT COUNT(*), MAX(rafraichi_le) FROM recouvrement.mv_contrats;')
+          nb, quand = cur.fetchone()
+          cur.close(); conn.close()
+          print(f'mv_contrats rafraichie : {nb} contrats, photo du {quand}, {time.time() - debut:.1f}s')
+          "
+
       - name: Gold - Snapshot quotidien unified_contracts
         run: python gold/snapshot_daily_contracts.py
 
