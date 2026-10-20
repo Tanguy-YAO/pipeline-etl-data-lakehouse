@@ -1,5 +1,28 @@
 -- delta/recouvrement-views.sql
 -- Couche de service de l'application de recouvrement (AppSheet)
+-- v6.3, 20/10/2026
+--
+-- Changement v6.3 : team_performance gagne la colonne clé id_ligne (entite-agent),
+--   exigée par AppSheet. NEoTCI reste dans la table contrats, isolé dans sa vue.
+--
+-- v6.2, 20/10/2026
+--
+-- Changement v6.2 : vue recouvrement.team_performance (tableau de bord des agents
+--   de crédit, mois en cours, TEVIA et GREENO), intégrée ici pour que la remise à
+--   zéro du schéma ne la supprime pas. Détail des règles : delta/team-performance.sql.
+--
+-- v6.1, 16/10/2026
+--
+-- Changement v6.1 : portefeuille NEoTCI, et exécution plus rapide (vw_contrats
+--   calculée une seule fois au lieu de trois quand on relance le fichier).
+--   * surge_neotci entre dans le périmètre, avec les règles TEVIA (aucun calcul
+--     spécifique : toutes les branches GREENO testent categorie = 'upya_greeno').
+--   * Nouvelle vue recouvrement.contrats_neotci : mêmes 49 colonnes que contrats_tevia.
+--   * Les trois vues filtrent désormais sur categorie et non plus sur entite :
+--     contrats_tevia = upya_tevia + surge_tevia, contrats_greeno = upya_greeno,
+--     contrats_neotci = surge_neotci. Ainsi NEoTCI ne peut pas se mélanger à TEVIA,
+--     quelle que soit la valeur de entite dans gold.
+--
 -- v6, 16/10/2026
 --
 -- Changement v6 : règles GREENO alignées le 16/10/2026 après analyse de greenodb.
@@ -324,7 +347,7 @@ base AS (
     LEFT JOIN greeno_ext ge
            ON uc.categorie = 'upya_greeno'
           AND ge.numero_contrat = uc.contract_number::text
-    WHERE uc.categorie IN ('upya_tevia', 'surge_tevia', 'upya_greeno')
+    WHERE uc.categorie IN ('upya_tevia', 'surge_tevia', 'upya_greeno', 'surge_neotci')
       AND uc.deal_type = 'PAYG'
       AND uc.contract_status IN ('ENABLED', 'LOCKED')
       AND uc.registration_date IS NOT NULL
@@ -617,7 +640,7 @@ CREATE INDEX idx_rec_contrats_agent  ON recouvrement.contrats (code_agent);
 INSERT INTO recouvrement.gel_mensuel (mois, numero_contrat, jours_retard_debut_mois, source)
 SELECT DATE '2026-10-01', numero_contrat, retard_debut_mois_greeno, 'greenodb'
 FROM recouvrement.contrats
-WHERE entite = 'greeno'
+WHERE categorie = 'upya_greeno'
   AND retard_debut_mois_greeno IS NOT NULL
 ON CONFLICT (mois, numero_contrat) DO NOTHING;
 
@@ -642,10 +665,30 @@ SELECT
     arriere, date_dernier_paiement, montant_dernier_paiement, jours_depuis_dernier_paiement,
     nb_paiements, paye_30_derniers_jours, source_calculee_le, rafraichi_le
 FROM recouvrement.contrats
-WHERE entite = 'tevia';
+WHERE categorie IN ('upya_tevia', 'surge_tevia');
 
 CREATE VIEW recouvrement.contrats_greeno AS
-SELECT * FROM recouvrement.contrats WHERE entite = 'greeno';
+SELECT * FROM recouvrement.contrats WHERE categorie = 'upya_greeno';
+
+-- NEoTCI (surge_neotci) : règles et colonnes TEVIA
+CREATE VIEW recouvrement.contrats_neotci AS
+-- Colonnes listées explicitement : les colonnes propres à GREENO
+-- (reference_greeno, retard_debut_mois_greeno, source_premiere_echeance) sont exclues.
+SELECT
+    numero_contrat, entite, source, categorie,
+    numero_client, nom_client, telephone_1, telephone_2,
+    code_agent, nom_agent, produit, numero_kit,
+    region, date_paiement_acompte, date_activation, age_jours,
+    mois_ecoules, premiere_echeance, prochaine_echeance, derniere_maj_statut,
+    jours_credit_restants, solde_jours, expire_sous_3_jours, statut_contrat, jours_retard,
+    tranche_ordre, tranche_retard, perte_seuil_efa, perte_seuil_credit,
+    jours_retard_inconnu, jours_manques_cumules, valeur_contrat, acompte,
+    mensualite, tarif_journalier, total_paye, reste_a_payer,
+    pct_rembourse, nb_mois_payes, mensualites_restantes, attendu_a_date,
+    arriere, date_dernier_paiement, montant_dernier_paiement, jours_depuis_dernier_paiement,
+    nb_paiements, paye_30_derniers_jours, source_calculee_le, rafraichi_le
+FROM recouvrement.contrats
+WHERE categorie = 'surge_neotci';
 
 
 -- ---------------------------------------------------------------------------
@@ -671,7 +714,7 @@ BEGIN
         INSERT INTO recouvrement.gel_mensuel (mois, numero_contrat, jours_retard_debut_mois, source)
         SELECT date_trunc('month', CURRENT_DATE)::date, numero_contrat, jours_retard_greeno, 'delta'
         FROM recouvrement.vw_contrats
-        WHERE entite = 'greeno'
+        WHERE categorie = 'upya_greeno'
           AND jours_retard_greeno IS NOT NULL;
     END IF;
 
@@ -680,8 +723,174 @@ BEGIN
 END;
 $$;
 
--- Premier remplissage avec le gel d'octobre en place
-SELECT recouvrement.rafraichir();
+-- Recalcul seulement si le gel vient d'être créé (base neuve) : sinon la table,
+-- créée plus haut, a déjà été calculée avec le gel en place. Un seul calcul de
+-- vw_contrats au lieu de deux quand on relance le fichier.
+DO $$
+BEGIN
+    IF (SELECT MIN(fige_le) FROM recouvrement.gel_mensuel) > now() - INTERVAL '1 minute' THEN
+        PERFORM recouvrement.rafraichir();
+    END IF;
+END $$;
+
+
+-- ---------------------------------------------------------------------------
+-- 5 bis. Tableau de bord des agents de crédit (v6.2) : recouvrement.team_performance
+--    Vue simple recalculée à chaque lecture (paiements lus en silver, 0,07 s).
+--    Règles et limites : voir l'en-tête de delta/team-performance.sql.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW recouvrement.team_performance AS
+WITH p AS (
+    -- Repères de calcul, tous dérivés de la date du jour
+    SELECT
+        CURRENT_DATE                                                   AS jour,
+        date_trunc('month', CURRENT_DATE)::date                        AS debut_mois,
+        EXTRACT(DAY FROM date_trunc('month', CURRENT_DATE)
+                         + INTERVAL '1 month - 1 day')::int            AS jours_du_mois,
+        EXTRACT(DAY FROM CURRENT_DATE)::int                            AS jour_du_mois,
+        EXTRACT(MONTH FROM CURRENT_DATE)::int                          AS mois,
+        (CURRENT_DATE - (EXTRACT(ISODOW FROM CURRENT_DATE)::int - 1))  AS lundi_semaine
+),
+attribution_tevia AS (
+    SELECT
+        a.contract_number::text                                        AS numero_contrat,
+        a.categorie,
+        NULLIF(TRIM(a.agent_credit), '')                               AS agent,
+        regexp_replace(COALESCE(a.asset_number::text, ''), '\D', '', 'g') AS cle_kit
+    FROM silver.greeno_client_contrat_tevia a
+    WHERE a.categorie IN ('upya_tevia', 'surge_tevia')
+),
+portefeuille AS (
+    -- TEVIA : attribution (garde aussi les contrats soldés dans le mois)
+    --         + contrats actifs non attribués
+    SELECT
+        'tevia'                                                        AS entite,
+        COALESCE(a.categorie, c.categorie)                             AS categorie,
+        COALESCE(a.numero_contrat, c.numero_contrat)                   AS numero_contrat,
+        COALESCE(NULLIF(a.cle_kit, ''),
+                 regexp_replace(COALESCE(c.numero_kit, ''), '\D', '', 'g')) AS cle_kit,
+        COALESCE(a.agent, 'Non attribué')                              AS agent,
+        (c.numero_contrat IS NOT NULL)                                 AS actif
+    FROM attribution_tevia a
+    FULL JOIN recouvrement.contrats_tevia c ON c.numero_contrat = a.numero_contrat
+    UNION ALL
+    -- GREENO : contrats actifs, agent de crédit greenodb
+    SELECT
+        'greeno', categorie, numero_contrat,
+        regexp_replace(COALESCE(numero_kit, ''), '\D', '', 'g'),
+        COALESCE(agent_credit_greeno, 'Non attribué'),
+        true
+    FROM recouvrement.contrats_greeno
+),
+fenetre AS (
+    -- Lit les paiements depuis le plus ancien des deux : 1er du mois ou lundi
+    -- de la semaine dernière
+    SELECT LEAST(debut_mois, lundi_semaine - 7) AS depuis FROM p
+),
+recharges AS (
+    SELECT pf.entite, pf.agent, up.payment_date::date AS jour_paiement, up.amount AS montant
+    FROM silver.upya_payments up
+    JOIN portefeuille pf
+      ON pf.numero_contrat = up.contract_number
+     AND pf.categorie IN ('upya_tevia', 'upya_greeno')
+    WHERE up.payment_date >= (SELECT depuis FROM fenetre)
+      AND up.status = 'ACCEPTED'
+      AND up.payment_code IN ('PAYMENT_SUCCESS', 'INCOMPLETE_PAYMENT',
+                              'FINAL_PAYMENT', 'PAYMENT_SUCCESS_PENALTY_CLEARED')
+    UNION ALL
+    SELECT pf.entite, pf.agent, sp.paid_time::date, sp.amount
+    FROM silver.surge_payments sp
+    JOIN portefeuille pf
+      ON pf.categorie = 'surge_tevia'
+     AND pf.cle_kit <> ''
+     AND pf.cle_kit = regexp_replace(COALESCE(sp.account::text, ''), '\D', '', 'g')
+    WHERE sp.paid_time >= (SELECT depuis FROM fenetre)
+      AND sp.payment_kind = 'Mobile Payment'
+      AND sp.payment_status = 'Processed'
+),
+collecte AS (
+    SELECT
+        r.entite, r.agent,
+        SUM(r.montant) FILTER (WHERE r.jour_paiement BETWEEN p.debut_mois AND p.jour)        AS collecte_mois,
+        SUM(r.montant) FILTER (WHERE r.jour_paiement BETWEEN p.lundi_semaine - 7
+                                                         AND p.lundi_semaine - 1)            AS semaine_derniere,
+        SUM(r.montant) FILTER (WHERE r.jour_paiement BETWEEN p.lundi_semaine AND p.jour)     AS cette_semaine,
+        SUM(r.montant) FILTER (WHERE r.jour_paiement = p.jour - 1)                           AS hier,
+        SUM(r.montant) FILTER (WHERE r.jour_paiement = p.jour)                               AS encaissements_du_jour
+    FROM recharges r CROSS JOIN p
+    GROUP BY r.entite, r.agent
+),
+contrats_actifs AS (
+    SELECT entite, agent, COUNT(*) FILTER (WHERE actif) AS nb_contrats
+    FROM portefeuille
+    GROUP BY entite, agent
+),
+objectifs AS (
+    -- Dernier chargement du mois en cours ; target stocké en texte
+    SELECT DISTINCT ON (entite, agent) entite, agent, target
+    FROM (
+        SELECT 'tevia' AS entite, TRIM(id_agent::text) AS agent,
+               NULLIF(regexp_replace(target::text, '[^0-9.]', '', 'g'), '')::numeric AS target,
+               mois::text AS mois, loaded_at
+        FROM silver.greeno_target_agent_tevia
+        UNION ALL
+        SELECT 'greeno', TRIM(id_agent_credit::text),
+               NULLIF(regexp_replace(target::text, '[^0-9.]', '', 'g'), '')::numeric,
+               mois::text, loaded_at
+        FROM silver.greeno_target_agent_credit
+    ) o
+    WHERE NULLIF(regexp_replace(o.mois, '\D', '', 'g'), '')::int = (SELECT mois FROM p)
+    ORDER BY entite, agent, loaded_at DESC
+),
+lignes AS (
+    SELECT
+        ca.entite, ca.agent, ca.nb_contrats,
+        o.target,
+        COALESCE(c.collecte_mois, 0)          AS collecte_mois,
+        COALESCE(c.semaine_derniere, 0)       AS semaine_derniere,
+        COALESCE(c.cette_semaine, 0)          AS cette_semaine,
+        COALESCE(c.hier, 0)                   AS hier,
+        COALESCE(c.encaissements_du_jour, 0)  AS encaissements_du_jour
+    FROM contrats_actifs ca
+    LEFT JOIN collecte  c ON c.entite = ca.entite AND c.agent = ca.agent
+    LEFT JOIN objectifs o ON o.entite = ca.entite AND o.agent = ca.agent
+)
+SELECT
+    l.entite || '-' || l.agent                                         AS id_ligne,  -- clé unique (AppSheet)
+    l.entite,
+    l.agent,
+    l.nb_contrats,
+    p.mois,
+    p.jours_du_mois,
+    p.jour_du_mois,
+    p.jours_du_mois - p.jour_du_mois                                   AS jours_restants,
+    l.target,
+    l.collecte_mois,
+    -- % réalisé : fraction (0,3083), à formater en % dans l'app
+    CASE WHEN COALESCE(l.target, 0) = 0 THEN NULL
+         ELSE ROUND(l.collecte_mois / l.target, 4) END                 AS pct_realise,
+    l.target - l.collecte_mois                                         AS reste_a_collecter,
+    FLOOR(l.target / p.jours_du_mois * p.jour_du_mois)                 AS objectif_a_date,
+    FLOOR(l.target / p.jours_du_mois * p.jour_du_mois) - l.collecte_mois AS a_collecter_aujourdhui,
+    CASE WHEN p.jours_du_mois - p.jour_du_mois <= 0
+         THEN l.target - l.collecte_mois
+         ELSE FLOOR((l.target - l.collecte_mois) / (p.jours_du_mois - p.jour_du_mois))
+    END                                                                AS montant_par_jour,
+    l.semaine_derniere,
+    l.cette_semaine,
+    l.hier,
+    l.encaissements_du_jour,
+    -- Fraîcheur : dernier paiement chargé dans chaque source
+    (SELECT MAX(payment_date) FROM silver.upya_payments
+      WHERE payment_date >= (SELECT depuis FROM fenetre))              AS dernier_paiement_upya,
+    (SELECT MAX(paid_time) FROM silver.surge_payments
+      WHERE paid_time >= (SELECT depuis FROM fenetre))                 AS dernier_paiement_surge,
+    now()                                                              AS calcule_le
+FROM lignes l
+CROSS JOIN p;
+
+COMMENT ON VIEW recouvrement.team_performance IS
+    'Tableau de bord des agents de crédit, mois en cours (TEVIA et GREENO). Vue recalculée à chaque lecture.';
 
 
 -- ---------------------------------------------------------------------------
@@ -691,7 +900,8 @@ SELECT recouvrement.rafraichir();
 -- ---------------------------------------------------------------------------
 GRANT USAGE ON SCHEMA recouvrement TO role_read, lucien;
 GRANT SELECT ON recouvrement.contrats, recouvrement.contrats_tevia,
-                recouvrement.contrats_greeno, recouvrement.vw_contrats,
+                recouvrement.contrats_greeno, recouvrement.contrats_neotci,
+                recouvrement.vw_contrats, recouvrement.team_performance,
                 recouvrement.gel_mensuel
     TO role_read, lucien;
 
@@ -744,12 +954,14 @@ GRANT SELECT ON recouvrement.contrats, recouvrement.contrats_tevia,
 
 -- ---------------------------------------------------------------------------
 -- 8. Contrôle final (dernier résultat affiché par pgAdmin)
---    vue_calcul = table_contrats ; vue_tevia > 0 ; lucien_lit_tevia = true
+--    contrats = tevia + greeno + neotci ; lucien_lit_tevia = true
+--    (v6.1 : la vue de calcul n'est plus recomptée ici, ce qui évitait un
+--     troisième calcul complet ; la table en est la copie exacte)
 -- ---------------------------------------------------------------------------
-SELECT (SELECT COUNT(*) FROM recouvrement.vw_contrats)    AS vue_calcul,
-       (SELECT COUNT(*) FROM recouvrement.contrats)       AS table_contrats,
+SELECT (SELECT COUNT(*) FROM recouvrement.contrats)       AS table_contrats,
        (SELECT COUNT(*) FROM recouvrement.contrats_tevia) AS vue_tevia,
        (SELECT COUNT(*) FROM recouvrement.contrats_greeno) AS vue_greeno,
+       (SELECT COUNT(*) FROM recouvrement.contrats_neotci) AS vue_neotci,
        (SELECT COUNT(*) FROM recouvrement.contrats_greeno
          WHERE source_premiere_echeance = 'greenodb')     AS greeno_rattaches_greenodb,
        (SELECT COUNT(*) FROM recouvrement.contrats_greeno
