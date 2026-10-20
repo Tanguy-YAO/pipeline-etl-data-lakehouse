@@ -1,5 +1,17 @@
 -- delta/recouvrement-views.sql
 -- Couche de service de l'application de recouvrement (AppSheet)
+-- v6.5, 20/10/2026
+--
+-- Changement v6.5 : contrats_greeno gagne jour_paiement_greeno (jour du mois de
+--   toutes les échéances : 5, 15, 25 ou exception greenodb). Absente de
+--   contrats_tevia et contrats_neotci (colonnes listées explicitement).
+--
+-- v6.4, 20/10/2026
+--
+-- Changement v6.4 : team_performance gagne une ligne « Total équipe » par entité
+--   (agents seuls), type_ligne, ordre_affichage et des montants arrondis ; nouvelle
+--   vue recouvrement.contrats_non_attribues (contrats actifs sans agent de crédit).
+--
 -- v6.3, 20/10/2026
 --
 -- Changement v6.3 : team_performance gagne la colonne clé id_ligne (entite-agent),
@@ -505,6 +517,10 @@ SELECT
     FLOOR(b.age_jours / 30.0)::int                                AS mois_ecoules,
     b.premiere_echeance,
     b.source_premiere_echeance,
+    -- GREENO : jour du mois où tombent toutes les échéances (5, 15, 25, ou
+    -- l'exception greenodb) ; les échéances suivent la première de mois en mois
+    CASE WHEN b.categorie = 'upya_greeno'
+         THEN EXTRACT(DAY FROM b.premiere_echeance)::int END        AS jour_paiement_greeno,
     b.prochaine_echeance,
     b.last_status_update::date                                    AS derniere_maj_statut,
     CASE WHEN b.contract_status = 'ENABLED'
@@ -842,23 +858,42 @@ objectifs AS (
     WHERE NULLIF(regexp_replace(o.mois, '\D', '', 'g'), '')::int = (SELECT mois FROM p)
     ORDER BY entite, agent, loaded_at DESC
 ),
-lignes AS (
+lignes_agents AS (
     SELECT
-        ca.entite, ca.agent, ca.nb_contrats,
+        ca.entite, ca.agent,
+        CASE WHEN ca.agent = 'Non attribué' THEN 'non_attribue' ELSE 'agent' END AS type_ligne,
+        ca.nb_contrats,
         o.target,
-        COALESCE(c.collecte_mois, 0)          AS collecte_mois,
-        COALESCE(c.semaine_derniere, 0)       AS semaine_derniere,
-        COALESCE(c.cette_semaine, 0)          AS cette_semaine,
-        COALESCE(c.hier, 0)                   AS hier,
-        COALESCE(c.encaissements_du_jour, 0)  AS encaissements_du_jour
+        ROUND(COALESCE(c.collecte_mois, 0))          AS collecte_mois,
+        ROUND(COALESCE(c.semaine_derniere, 0))       AS semaine_derniere,
+        ROUND(COALESCE(c.cette_semaine, 0))          AS cette_semaine,
+        ROUND(COALESCE(c.hier, 0))                   AS hier,
+        ROUND(COALESCE(c.encaissements_du_jour, 0))  AS encaissements_du_jour
     FROM contrats_actifs ca
     LEFT JOIN collecte  c ON c.entite = ca.entite AND c.agent = ca.agent
     LEFT JOIN objectifs o ON o.entite = ca.entite AND o.agent = ca.agent
+),
+lignes AS (
+    SELECT * FROM lignes_agents
+    UNION ALL
+    -- Ligne total par équipe (TEVIA, GREENO) : somme des agents uniquement,
+    -- hors « Non attribué », pour que le % réalisé se compare à l'objectif
+    -- de l'équipe. La ligne « Non attribué » reste affichée à part.
+    SELECT
+        entite, 'Total équipe', 'total',
+        SUM(nb_contrats), SUM(target),
+        SUM(collecte_mois), SUM(semaine_derniere), SUM(cette_semaine),
+        SUM(hier), SUM(encaissements_du_jour)
+    FROM lignes_agents
+    WHERE type_ligne = 'agent'
+    GROUP BY entite
 )
 SELECT
     l.entite || '-' || l.agent                                         AS id_ligne,  -- clé unique (AppSheet)
     l.entite,
     l.agent,
+    l.type_ligne,                                                      -- agent / non_attribue / total
+    CASE l.type_ligne WHEN 'agent' THEN 1 WHEN 'non_attribue' THEN 2 ELSE 3 END AS ordre_affichage,
     l.nb_contrats,
     p.mois,
     p.jours_du_mois,
@@ -893,6 +928,45 @@ COMMENT ON VIEW recouvrement.team_performance IS
     'Tableau de bord des agents de crédit, mois en cours (TEVIA et GREENO). Vue recalculée à chaque lecture.';
 
 
+-- ============================================================================
+-- recouvrement.contrats_non_attribues : contrats actifs sans agent de crédit
+-- Mêmes règles que la ligne « Non attribué » de team_performance :
+--   TEVIA  : contrat absent de silver.greeno_client_contrat_tevia ;
+--   GREENO : agent_credit_greeno vide (contrat absent de greenodb).
+-- À exporter en CSV depuis pgAdmin pour la répartition par la credit manager.
+-- ============================================================================
+CREATE OR REPLACE VIEW recouvrement.contrats_non_attribues AS
+SELECT
+    c.entite,
+    c.categorie,
+    c.numero_contrat,
+    c.numero_client,
+    c.nom_client,
+    c.telephone_1,
+    c.telephone_2,
+    c.region,
+    c.produit,
+    c.code_agent                     AS code_commercial,
+    c.nom_agent                      AS nom_commercial,
+    c.date_activation,
+    c.statut_contrat,
+    c.jours_retard,
+    c.situation_paiement_greeno,
+    c.jours_retard_greeno,
+    c.solde_jours,
+    c.mensualite,
+    c.total_paye,
+    c.reste_a_payer,
+    c.date_dernier_paiement,
+    c.paye_30_derniers_jours
+FROM recouvrement.contrats c
+WHERE (c.categorie IN ('upya_tevia', 'surge_tevia')
+       AND NOT EXISTS (SELECT 1 FROM silver.greeno_client_contrat_tevia a
+                       WHERE a.contract_number::text = c.numero_contrat
+                         AND a.categorie IN ('upya_tevia', 'surge_tevia')))
+   OR (c.categorie = 'upya_greeno' AND c.agent_credit_greeno IS NULL);
+
+
 -- ---------------------------------------------------------------------------
 -- 6. Droits
 --    Les privilèges par défaut du schéma couvrent déjà les objets créés par
@@ -902,6 +976,7 @@ GRANT USAGE ON SCHEMA recouvrement TO role_read, lucien;
 GRANT SELECT ON recouvrement.contrats, recouvrement.contrats_tevia,
                 recouvrement.contrats_greeno, recouvrement.contrats_neotci,
                 recouvrement.vw_contrats, recouvrement.team_performance,
+                recouvrement.contrats_non_attribues,
                 recouvrement.gel_mensuel
     TO role_read, lucien;
 
