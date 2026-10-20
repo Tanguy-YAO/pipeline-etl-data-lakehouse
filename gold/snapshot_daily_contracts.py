@@ -14,17 +14,19 @@ Prérequis
     ou configurer les variables individuelles DB_HOST, DB_PORT, DB_NAME,
     DB_USER, DB_PASSWORD.
 
-Table cible (créer une fois si absente) :
+Table cible (schéma allégé v2 — 25 colonnes) :
     CREATE TABLE IF NOT EXISTS gold.unified_daily_snapshot (
         snapshot_date           date        NOT NULL,
-        contract_number         bigint,
+        contract_number         text        NOT NULL,
         entite                  text,
         source                  text,
         categorie               text,
         client_number           text,
-        registration_date       timestamptz,
+        registration_date       date,
         paid_off_date           date,
         repossession_date       date,
+        last_status_update      date,
+        next_status_update      date,
         product_name            text,
         deal_type               text,
         total_contract_value    numeric,
@@ -34,12 +36,17 @@ Table cible (créer une fois si absente) :
         remaining_debt          numeric,
         contract_status         text,
         paid_off                boolean,
-        consecutive_locked_days numeric,
+        consecutive_locked_days integer,
         region                  text,
         sub_prefecture          text,
         computed_at             timestamptz,
+        snapshotted_at          timestamptz NOT NULL DEFAULT now(),
         PRIMARY KEY (snapshot_date, contract_number)
     );
+
+Colonnes supprimées (v2, migration : ALTER TABLE ... DROP COLUMN) :
+    customer_name, agent_number, agent_name, paid_date,
+    asset_number, village, latitude, longitude, phone_number
 """
 
 import argparse
@@ -52,7 +59,7 @@ import psycopg2
 import psycopg2.extras
 
 from dotenv import load_dotenv
-load_dotenv()  # Charger les variables d'environnement depuis .env si présent
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,7 +69,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# Connexion
+# Connexion 
 
 def get_conn():
     url = os.getenv("DATABASE_URL")
@@ -78,6 +85,11 @@ def get_conn():
 
 
 # Colonnes à snapshoter
+#
+# Règle : on ne stocke que ce qui change dans le temps (statuts, paiements,
+# CLD, dates de fin) + les ancres de cohorte (registration_date, categorie…).
+# Les données client/agent/géo statiques (nom, téléphone, village…) sont
+# tirées de gold.unified_contracts à la requête, pas stockées ici.
 
 COLUMNS = [
     "contract_number",
@@ -85,9 +97,11 @@ COLUMNS = [
     "source",
     "categorie",
     "client_number",
-    "registration_date",
-    "paid_off_date",
-    "repossession_date",
+    "registration_date::date",
+    "paid_off_date::date",
+    "repossession_date::date",
+    "last_status_update::date",
+    "next_status_update::date",
     "product_name",
     "deal_type",
     "total_contract_value::numeric",
@@ -103,7 +117,7 @@ COLUMNS = [
     "computed_at",
 ]
 
-# Noms des colonnes cibles (sans le cast)
+# Noms des colonnes cibles (sans les casts SQL)
 TARGET_COLS = [c.split("::")[0] for c in COLUMNS]
 
 
@@ -112,9 +126,6 @@ TARGET_COLS = [c.split("::")[0] for c in COLUMNS]
 def run_snapshot(target_date: date, force: bool = False):
     log.info("Snapshot cible : %s", target_date)
 
-    # FIX 1 : conn est maintenant à l'intérieur du try.
-    # Si get_conn() échoue (réseau, credentials), l'erreur est loggée
-    # par le except ci-dessous au lieu de remonter silencieusement.
     try:
         conn = get_conn()
         conn.autocommit = False
@@ -160,6 +171,7 @@ def run_snapshot(target_date: date, force: bool = False):
                     return
 
                 # Insertion en batch
+                # snapshotted_at est omis : DEFAULT NOW() côté PostgreSQL
                 insert_sql = """
                     INSERT INTO gold.unified_daily_snapshot
                         (snapshot_date, {cols})
@@ -167,7 +179,6 @@ def run_snapshot(target_date: date, force: bool = False):
                     ON CONFLICT (snapshot_date, contract_number) DO NOTHING
                 """.format(cols=", ".join(TARGET_COLS))
 
-                # Préfixer chaque ligne avec la date snapshot
                 data = [(target_date,) + row for row in rows]
 
                 psycopg2.extras.execute_values(cur, insert_sql, data, page_size=2000)
@@ -189,7 +200,6 @@ def run_snapshot(target_date: date, force: bool = False):
             conn.rollback()
             log.error("Erreur snapshot : %s", exc)
 
-            # Tenter quand même de logger l'échec
             try:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -209,8 +219,6 @@ def run_snapshot(target_date: date, force: bool = False):
             conn.close()
 
     except Exception as exc:
-        # FIX 2 : toute exception (y compris échec get_conn) est loggée ici
-        # avant de remonter au __main__.
         log.error("Échec critique run_snapshot : %s", exc)
         raise
 
@@ -234,5 +242,5 @@ if __name__ == "__main__":
 
     try:
         run_snapshot(target_date=args.date, force=args.force)
-    except Exception as e:
+    except Exception:
         sys.exit(1)
