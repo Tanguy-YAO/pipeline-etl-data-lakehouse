@@ -87,6 +87,15 @@ jobs:
       - name: Silver - Chargement locations (Google Sheets)
         run: python locations_upsert_etl.py
 
+      - name: Gold - Rafraîchir le total payé SURGE
+        env:
+          PGHOST: ${{ secrets.DB_HOST }}
+          PGPORT: ${{ secrets.DB_PORT }}
+          PGDATABASE: ${{ secrets.DB_NAME }}
+          PGUSER: ${{ secrets.DB_USER }}
+          PGPASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: psql -v ON_ERROR_STOP=1 -c "REFRESH MATERIALIZED VIEW CONCURRENTLY gold.mv_surge_total_paye;"
+      
       # Remplit la table recouvrement.contrats (lue par l'app AppSheet) à partir
       # de la vue de calcul recouvrement.vw_contrats.
       # Placé juste après le dernier chargement Silver : les vues gold lisent
