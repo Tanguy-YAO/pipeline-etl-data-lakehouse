@@ -124,6 +124,26 @@ jobs:
       - name: Gold - Snapshot quotidien unified_contracts
         run: python gold/snapshot_daily_contracts.py
 
+      # Enregistre le portefeuille du jour pour Metabase (bi.contrat_etat) et
+      # recalcule la collecte (bi.collecte). Placé APRÈS le snapshot : il lit
+      # gold.unified_daily_snapshot. Rattrape aussi les jours manqués.
+      - name: BI - Photo du jour (Metabase)
+        run: |
+          python -c "
+          import sys, time
+          sys.path.append('.')
+          from dotenv import load_dotenv
+          from database.db_client import get_db_connection
+          load_dotenv()
+          debut = time.time()
+          conn = get_db_connection()
+          conn.autocommit = True
+          cur = conn.cursor()
+          cur.execute('SELECT bi.photographier_du_jour();')
+          print(cur.fetchone()[0], f'({time.time() - debut:.1f}s)')
+          cur.close(); conn.close()
+          "
+
       - name: Statut pipeline
         if: always()
         run: |
