@@ -1,5 +1,6 @@
 -- ============================================================================
--- recouvrement-attribution-neotci-v2.sql  (09/11/2026)
+-- recouvrement-attribution-neotci-v2.1.sql  (09/11/2026, v2.1 le 11/11/2026)
+-- v2.1 : retrait du re-partage automatique ; table d'attribution protégée.
 -- Ajustements de l'app de recouvrement NEoTCI demandés le 09/11/2026 au soir.
 --
 -- Attribution
@@ -118,12 +119,17 @@ $$;
 
 
 -- ---------------------------------------------------------------------------
--- 3. Nouveau partage de novembre avec les nouvelles règles
--- ---------------------------------------------------------------------------
-DELETE FROM recouvrement.attribution_neotci WHERE mois = date_trunc('month', CURRENT_DATE)::date;
-SELECT recouvrement.attribuer_neotci();
-
-
+-- 3. Partage du mois : RETIRÉ le 11/11/2026
+--    Ce bloc effaçait le partage du mois en cours et le refaisait. Relancé le
+--    11/11 à 12h31, il a changé l'agent d'une partie des clients en pleine
+--    journée. Le partage est fait uniquement par le pipeline (premier
+--    rafraîchissement du mois), et la table est protégée (section 6).
+--    Réattribution volontaire, en connaissance de cause seulement :
+--      BEGIN;
+--      SET LOCAL recouvrement.reattribution = 'oui';
+--      DELETE FROM recouvrement.attribution_neotci WHERE mois = date_trunc('month', CURRENT_DATE)::date;
+--      SELECT recouvrement.attribuer_neotci();
+--      COMMIT;
 -- ---------------------------------------------------------------------------
 -- 4. Vue lue par l'app NEoTCI
 -- ---------------------------------------------------------------------------
@@ -243,3 +249,29 @@ WHERE c.categorie = 'surge_neotci';
 
 -- Contrôle
 SELECT COUNT(*), MIN(solde_jours), MAX(jours_retard) FROM recouvrement.contrats_neotci;
+
+
+-- ---------------------------------------------------------------------------
+-- 6. Protection de l'attribution (11/11/2026)
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION recouvrement.proteger_attribution_neotci()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF current_setting('recouvrement.reattribution', true) IS DISTINCT FROM 'oui' THEN
+        RAISE EXCEPTION 'Attribution NEoTCI figée : % refusé sur recouvrement.attribution_neotci. '
+                        'Pour une réattribution voulue : SET LOCAL recouvrement.reattribution = ''oui''; dans la même transaction.', TG_OP;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_proteger_attribution_neotci ON recouvrement.attribution_neotci;
+CREATE TRIGGER trg_proteger_attribution_neotci
+    BEFORE DELETE OR UPDATE OR TRUNCATE ON recouvrement.attribution_neotci
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION recouvrement.proteger_attribution_neotci();
+
+-- Contrôle : doit échouer avec le message « Attribution NEoTCI figée »
+-- DELETE FROM recouvrement.attribution_neotci WHERE false;
