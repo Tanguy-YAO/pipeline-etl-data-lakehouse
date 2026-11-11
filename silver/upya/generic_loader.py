@@ -1,4 +1,4 @@
-# silver/upya/generic_loader.py
+# silver/upya/generic_loader.py  (v2, 11/11/2026)
 #
 # RÔLE : Loader générique pour les entités UPYA simples.
 # Lit les JSON Bronze MinIO et charge dans PostgreSQL Silver.
@@ -20,6 +20,23 @@
 #
 # CORRECTIF (05/09/2026) : ajout entité agents
 # CORRECTIF (27/09/2026) : ajout entités tasks et forms
+#
+# CORRECTIF v2 (11/11/2026, audit DELTA) :
+# - Le ON CONFLICT DO UPDATE ne mettait à jour qu'une partie des colonnes.
+#   clients : seuls status et mobile suivaient ; prénom, nom, genre,
+#   village, district, région restaient figés à la première insertion
+#   (cas C903641332 : fiche renommée Youssouf Kone dans UPYA, DELTA gardait
+#   Pierrot Ouloubonmou ; 181 contrats au contrôle G). Même défaut, moindre
+#   portée, sur assets, deals, tasks, forms et tickets.
+#   Toutes les colonnes sont désormais mises à jour. Pour les colonnes
+#   descriptives, une valeur vide de l'API n'écrase pas une valeur connue
+#   (COALESCE) ; les colonnes d'état (status, dates de déploiement, de
+#   clôture...) gardent l'affectation directe, comme avant.
+# - clients : nouvelle colonne contact_json (objet contact complet de l'API),
+#   pour retrouver le second mobile que DELTA ne lisait pas.
+# - Un élément sans identifiant était compté comme une erreur : un seul
+#   suffisait à bloquer le watermark à vie. Il est désormais compté à part
+#   (« ignorés ») et n'empêche plus le watermark d'avancer.
 
 import os
 import sys
@@ -82,6 +99,10 @@ ENTITIES = {
                 distributed_status = EXCLUDED.distributed_status,
                 deploy_date        = EXCLUDED.deploy_date,
                 date_added         = EXCLUDED.date_added,
+                asset_id           = COALESCE(EXCLUDED.asset_id,          silver.upya_assets.asset_id),
+                serial_number      = COALESCE(EXCLUDED.serial_number,     silver.upya_assets.serial_number),
+                product_reference  = COALESCE(EXCLUDED.product_reference, silver.upya_assets.product_reference),
+                batch_number       = COALESCE(EXCLUDED.batch_number,      silver.upya_assets.batch_number),
                 updated_at         = NOW();
         """,
         "transform": lambda item: _transform_asset(item),
@@ -105,17 +126,28 @@ ENTITIES = {
             );
             CREATE INDEX IF NOT EXISTS idx_upya_clients_status
                 ON silver.upya_clients(status);
+            ALTER TABLE silver.upya_clients
+                ADD COLUMN IF NOT EXISTS contact_json JSONB;
         """,
         "upsert_sql": """
             INSERT INTO silver.upya_clients (
                 client_number, status, first_name, last_name,
                 gender, mobile, village, district, region,
-                country, entry_date
+                country, entry_date, contact_json
             ) VALUES %s
             ON CONFLICT (client_number) DO UPDATE SET
-                status     = EXCLUDED.status,
-                mobile     = EXCLUDED.mobile,
-                updated_at = NOW();
+                status       = EXCLUDED.status,
+                first_name   = COALESCE(NULLIF(TRIM(EXCLUDED.first_name), ''), silver.upya_clients.first_name),
+                last_name    = COALESCE(NULLIF(TRIM(EXCLUDED.last_name),  ''), silver.upya_clients.last_name),
+                gender       = COALESCE(EXCLUDED.gender,       silver.upya_clients.gender),
+                mobile       = COALESCE(NULLIF(TRIM(EXCLUDED.mobile), ''), silver.upya_clients.mobile),
+                village      = COALESCE(EXCLUDED.village,      silver.upya_clients.village),
+                district     = COALESCE(EXCLUDED.district,     silver.upya_clients.district),
+                region       = COALESCE(EXCLUDED.region,       silver.upya_clients.region),
+                country      = COALESCE(EXCLUDED.country,      silver.upya_clients.country),
+                entry_date   = COALESCE(EXCLUDED.entry_date,   silver.upya_clients.entry_date),
+                contact_json = COALESCE(EXCLUDED.contact_json, silver.upya_clients.contact_json),
+                updated_at   = NOW();
         """,
         "transform": lambda item: _transform_client(item),
     },
@@ -145,6 +177,11 @@ ENTITIES = {
                 status            = EXCLUDED.status,
                 total_cost        = EXCLUDED.total_cost,
                 pricing_recurring = EXCLUDED.pricing_recurring,
+                deal_name         = COALESCE(EXCLUDED.deal_name,       silver.upya_deals.deal_name),
+                type              = COALESCE(EXCLUDED.type,            silver.upya_deals.type),
+                pricing_days      = COALESCE(EXCLUDED.pricing_days,    silver.upya_deals.pricing_days),
+                pricing_upfront   = COALESCE(EXCLUDED.pricing_upfront, silver.upya_deals.pricing_upfront),
+                set_up_on         = COALESCE(EXCLUDED.set_up_on,       silver.upya_deals.set_up_on),
                 updated_at        = NOW();
         """,
         "transform": lambda item: _transform_deal(item),
@@ -228,6 +265,14 @@ ENTITIES = {
                 closed_on             = EXCLUDED.closed_on,
                 assigned_to           = EXCLUDED.assigned_to,
                 updated_at_src        = EXCLUDED.updated_at_src,
+                task_number           = COALESCE(EXCLUDED.task_number,           silver.upya_tasks.task_number),
+                instructions          = COALESCE(EXCLUDED.instructions,          silver.upya_tasks.instructions),
+                assigned_on           = COALESCE(EXCLUDED.assigned_on,           silver.upya_tasks.assigned_on),
+                due_on                = COALESCE(EXCLUDED.due_on,                silver.upya_tasks.due_on),
+                assigned_to_last_name = COALESCE(EXCLUDED.assigned_to_last_name, silver.upya_tasks.assigned_to_last_name),
+                contract_number       = COALESCE(EXCLUDED.contract_number,       silver.upya_tasks.contract_number),
+                client_number         = COALESCE(EXCLUDED.client_number,         silver.upya_tasks.client_number),
+                parent_ticket         = COALESCE(EXCLUDED.parent_ticket,         silver.upya_tasks.parent_ticket),
                 updated_at            = NOW();
         """,
         "transform": lambda item: _transform_task(item),
@@ -269,6 +314,15 @@ ENTITIES = {
                 questionnaire_name = EXCLUDED.questionnaire_name,
                 updated_at_src     = EXCLUDED.updated_at_src,
                 raw_data           = EXCLUDED.raw_data,
+                survey             = EXCLUDED.survey,
+                paid               = EXCLUDED.paid,
+                contract_number    = COALESCE(EXCLUDED.contract_number,  silver.upya_forms.contract_number),
+                client_number      = COALESCE(EXCLUDED.client_number,    silver.upya_forms.client_number),
+                collector_number   = COALESCE(EXCLUDED.collector_number, silver.upya_forms.collector_number),
+                collector_name     = COALESCE(EXCLUDED.collector_name,   silver.upya_forms.collector_name),
+                credit_agent_ref   = COALESCE(EXCLUDED.credit_agent_ref, silver.upya_forms.credit_agent_ref),
+                form_date          = COALESCE(EXCLUDED.form_date,        silver.upya_forms.form_date),
+                created_at_src     = COALESCE(EXCLUDED.created_at_src,   silver.upya_forms.created_at_src),
                 updated_at         = NOW();
         """,
         "transform": lambda item: _transform_form(item),
@@ -301,10 +355,16 @@ ENTITIES = {
                 created_at_src, updated_at_src
             ) VALUES %s
             ON CONFLICT (ticket_id) DO UPDATE SET
-                status         = EXCLUDED.status,
-                progress       = EXCLUDED.progress,
-                updated_at_src = EXCLUDED.updated_at_src,
-                updated_at     = NOW();
+                status          = EXCLUDED.status,
+                progress        = EXCLUDED.progress,
+                updated_at_src  = EXCLUDED.updated_at_src,
+                ticket_number   = COALESCE(EXCLUDED.ticket_number,   silver.upya_tickets.ticket_number),
+                title           = COALESCE(EXCLUDED.title,           silver.upya_tickets.title),
+                contract_number = COALESCE(EXCLUDED.contract_number, silver.upya_tickets.contract_number),
+                client_number   = COALESCE(EXCLUDED.client_number,   silver.upya_tickets.client_number),
+                origin          = COALESCE(EXCLUDED.origin,          silver.upya_tickets.origin),
+                created_at_src  = COALESCE(EXCLUDED.created_at_src,  silver.upya_tickets.created_at_src),
+                updated_at      = NOW();
         """,
         "transform": lambda item: _transform_ticket(item),
     },
@@ -385,6 +445,7 @@ def _transform_client(item):
         profile.get("region"),
         profile.get("country"),
         _parse_date(item.get("entryDate")),
+        json.dumps(contact, ensure_ascii=False, default=str) if contact else None,
     )
 
 
@@ -527,6 +588,7 @@ def load_entity(entity_name, date=None):
 
     total_rows    = 0
     total_errors  = 0
+    total_ignores = 0   # v2 : éléments sans identifiant, sans effet sur le watermark
     max_date_seen = since
 
     for file_key in files:
@@ -540,7 +602,7 @@ def load_entity(entity_name, date=None):
                 if row:
                     rows.append(row)
                 else:
-                    total_errors += 1
+                    total_ignores += 1
 
             if rows:
                 cur = conn.cursor()
@@ -567,8 +629,11 @@ def load_entity(entity_name, date=None):
     elif total_errors > 0:
         logger.warning(f"{total_errors} erreur(s) — watermark {entity_name} non avancé, retraité au prochain run")
 
+    if total_ignores:
+        logger.warning(f"{total_ignores} élément(s) sans identifiant ignoré(s) ({entity_name})")
+
     duration = time.time() - start_time
-    logger.info(f"TERMINE — {entity_name.upper()} : {total_rows:,} lignes / {total_errors} erreurs / {duration:.1f}s")
+    logger.info(f"TERMINE v2 — {entity_name.upper()} : {total_rows:,} lignes / {total_errors} erreurs / {total_ignores} ignorés / {duration:.1f}s")
 
     conn.close()
     return total_rows

@@ -1,4 +1,4 @@
-# storage/minio_client.py
+# storage/minio_client.py  (v2, 11/11/2026)
 # Brique de connexion MinIO
 #
 # CORRECTIF (06/08/2026) : l'upload de surge_payments (376 MB) a échoué
@@ -204,6 +204,10 @@ def list_bronze_files(client, bucket_name, source, entity, since_date=None):
     a cette date, pour ne jamais tout recharger mais aussi ne jamais
     sauter un jour reste en echec.
 
+    CORRECTIF (11/11/2026) : la date du watermark est maintenant incluse
+    (>=). Le watermark ne porte que le jour : en l'excluant, seul le
+    premier passage de chaque journee chargeait quelque chose.
+
     since_date : format 'YYYY/MM/DD' ou None (= tout charger, utilise
     uniquement lors du tout premier run avant qu'un watermark existe).
     La comparaison de chaines fonctionne car le format zero-padded
@@ -220,11 +224,44 @@ def list_bronze_files(client, bucket_name, source, entity, since_date=None):
         # object_name : bronze/upya/contracts/2026/08/21/page_001.json
         parts = obj.object_name.replace(prefix, "").split("/")
         file_date = "/".join(parts[:3])  # "2026/08/21"
-        if file_date > since_date:
+        # v2 (11/11/2026) : >= au lieu de >. Le watermark est un jour, pas une
+        # heure : avec >, le jour du watermark etait exclu et les 2e, 3e et
+        # 4e passages de la journee ne trouvaient aucun fichier (0 ligne,
+        # run en succes). Le jour du watermark est desormais relu : l'upsert
+        # rend la relecture sans effet de bord.
+        if file_date >= since_date:
             keys.append(obj.object_name)
 
     logger.info(f"Fichiers trouvés ({source}/{entity}), depuis {since_date or 'le début'} : {len(keys)}")
     return keys
+
+
+def purge_pages_apres(client, bucket_name, source, entity, derniere_page):
+    """
+    Supprime, dans le dossier du jour, les pages de numero superieur a
+    derniere_page (11/11/2026).
+
+    Une deuxieme extraction le meme jour reecrit page_001, page_002... aux
+    memes chemins. Si elle a moins de pages que la premiere, les pages en
+    trop de la premiere restaient et etaient rechargees avec des donnees
+    perimees. Appelee a la fin d'une extraction complete reussie.
+    """
+    date_path = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+    prefix = f"bronze/{source}/{entity}/{date_path}/"
+    supprimees = 0
+    for obj in client.list_objects(bucket_name, prefix=prefix, recursive=True):
+        nom = obj.object_name.rsplit("/", 1)[-1]
+        if nom.startswith("page_") and nom.endswith(".json"):
+            try:
+                numero = int(nom[5:-5])
+            except ValueError:
+                continue
+            if numero > derniere_page:
+                client.remove_object(bucket_name, obj.object_name)
+                supprimees += 1
+    if supprimees:
+        logger.info(f"{supprimees} page(s) perimee(s) supprimee(s) dans {prefix}")
+    return supprimees
 
 
 def download_json(client, bucket_name, object_key):
