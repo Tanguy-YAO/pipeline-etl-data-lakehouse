@@ -1,6 +1,9 @@
--- gold-unified-contracts-v17.sql  (04/11/2026, v17.1 ; v17.1.1 le 11/11/2026)
+-- ============================================================================
+-- gold-unified-contracts-v17.sql  (04/11/2026, v17.1 ; v17.1.2 le 11/11/2026)
 -- v17.1.1 : phone_number_2 = second mobile SURGE, sinon contact.secondaryMobile
 --   de la fiche UPYA (silver.upya_clients.contact_json, generic_loader v2).
+-- v17.1.2 : phone_number_2 écarté quand il recopie le premier numéro
+--   (8 683 contrats upya_tevia le 11/11).
 -- v17.1 : région et sous-préfecture des migrés reprises de SURGE quand UPYA
 --   n'en a pas (rattachement au régional du comité : 76,7 % en v17).
 -- gold.unified_contracts v16 → v17 : migration des clients SURGE dans UPYA
@@ -147,8 +150,14 @@ CREATE OR REPLACE VIEW gold.unified_contracts_calc
             cl.mobile AS phone_number,
             -- v17.1.1 (11/11/2026) : second mobile de la fiche UPYA (contact.secondaryMobile,
             -- lu par generic_loader v2) quand SURGE n'en donne pas
-            COALESCE(NULLIF(TRIM(st.snd_mobile::text), ''),
-                     NULLIF(TRIM(cl.contact_json ->> 'secondaryMobile'), '')) AS phone_number_2,
+            -- v17.1.2 : écarté quand c'est le premier numéro recopié (mêmes 8 derniers chiffres)
+            CASE WHEN right(regexp_replace(COALESCE(NULLIF(TRIM(st.snd_mobile::text), ''),
+                                                    NULLIF(TRIM(cl.contact_json ->> 'secondaryMobile'), '')), '\D', '', 'g'), 8)
+                    = right(regexp_replace(COALESCE(cl.mobile, ''), '\D', '', 'g'), 8)
+                 THEN NULL
+                 ELSE COALESCE(NULLIF(TRIM(st.snd_mobile::text), ''),
+                               NULLIF(TRIM(cl.contact_json ->> 'secondaryMobile'), ''))
+            END AS phone_number_2,
             c.numero_origine,
             CASE WHEN c.numero_origine IS NOT NULL THEN 'surge'::text ELSE 'upya'::text END AS origine,
             (corr.statut IS NOT NULL) AS statut_corrige_surge
