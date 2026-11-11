@@ -4,6 +4,14 @@
 # Au lieu de répéter le même code 10 fois, on paramètre
 # l'extracteur selon l'endpoint cible.
 #
+# CORRECTION (11/11/2026, audit DELTA) :
+# - Une erreur réseau ou HTTP en cours de pagination arrêtait la boucle sans
+#   erreur : le run était journalisé « success » avec des pages manquantes.
+#   Pour un rechargement complet (contracts, assets, clients…), les contrats
+#   des pages manquantes n'étaient pas mis à jour ce jour-là, sans alerte.
+#   L'erreur est désormais levée : le run est journalisé « error » et le
+#   watermark des entités incrémentales n'avance pas.
+#
 # UTILISATION :
 #   python generic_extractor.py contracts
 #   python generic_extractor.py assets clients agents
@@ -28,9 +36,7 @@ from database.db_client import get_db_connection, init_schemas, init_run_log, lo
 
 logger = logging.getLogger(__name__)
 
-# ============================================================
 # Configuration de chaque endpoint UPYA
-# ============================================================
 ENDPOINTS = {
     "contracts": {
         "url":           "https://data.upya.io/data/search/contracts",
@@ -142,11 +148,11 @@ def get_item_id(item, entity_name):
     si on voit les mêmes IDs deux fois, on s'arrête.
 
     Chaque endpoint a son propre champ d'identifiant :
-    - contracts   → contractNumber
-    - assets      → paygNumber
-    - clients     → clientNumber
-    - payments    → transactionId
-    - deals       → dealNumber
+    - contracts   - contractNumber
+    - assets      - paygNumber
+    - clients     - clientNumber
+    - payments    - transactionId
+    - deals       - dealNumber
     - etc.
     """
     id_fields = {
@@ -214,8 +220,8 @@ def extract_entity(entity_name, conn, minio_client, bucket, auth, session):
     total_rows = 0
 
     # seen_ids : ensemble de tous les IDs déjà vus
-    # Si une page entière contient des IDs déjà vus →
-    # l'API boucle → on arrête
+    # Si une page entière contient des IDs déjà vus -
+    # l'API boucle - on arrête
     seen_ids = set()
 
     while True:
@@ -238,11 +244,17 @@ def extract_entity(entity_name, conn, minio_client, bucket, auth, session):
             )
         except requests.RequestException as e:
             logger.error(f"[{entity_name}] Erreur réseau p.{page}: {e}")
-            break
+            raise RuntimeError(
+                f"[{entity_name}] extraction incomplète : erreur réseau page {page} "
+                f"({total_rows} lignes déjà extraites)"
+            ) from e
 
         if resp.status_code != 200:
             logger.error(f"[{entity_name}] HTTP {resp.status_code} p.{page}")
-            break
+            raise RuntimeError(
+                f"[{entity_name}] extraction incomplète : HTTP {resp.status_code} page {page} "
+                f"({total_rows} lignes déjà extraites)"
+            )
 
         raw   = resp.json()
         items = raw.get("data", raw) if isinstance(raw, dict) else raw

@@ -1,4 +1,4 @@
-# silver/upya/contracts_loader.py v3.4
+# silver/upya/contracts_loader.py v3.5
 #
 # NOUVEAUTÉS v3 :
 # - Ajout repossession_date (depuis repossessionDate API)
@@ -11,12 +11,31 @@
 # - district conservé séparément
 # CORRECTION v3.3 :
 # - Ajout latitude et longitude depuis profile.gps (UPYA API)
+# CORRECTION v3.5 (11/11/2026, audit DELTA) :
+# - L'UPSERT ne mettait pas à jour 8 colonnes : registration_date, product_name,
+#   asset_number, client_number, customer_name, agent_number, agent_name, region.
+#   Elles restaient figées à la première insertion du contrat : nom du client
+#   d'avant un changement de titulaire, kit et date de déploiement vides pour
+#   les contrats chargés avant l'installation (5 073 contrats sans kit, 2 132
+#   sans date de déploiement au 11/11). Toutes les colonnes sont désormais
+#   mises à jour, sauf loaded_at.
+# - Une valeur vide renvoyée par l'API n'écrase pas une valeur déjà connue
+#   (COALESCE) pour les colonnes descriptives ; les statuts, dates et montants
+#   sont toujours pris tels quels.
+# - registration_date lit deployDate (la v3.4 en production lisait signingDate
+#   une seconde fois) et n'est jamais conservée : les dates de signature
+#   écrites à tort sont remplacées au premier passage.
+# - Dates : formats ISO avec fuseau ou sans millisecondes acceptés ; les dates
+#   non vides illisibles sont comptées et signalées au lieu de devenir NULL en silence.
+# - Filtre des comptes de test : mot entier « test » (un nom contenant « test »
+#   au milieu d'un mot n'est plus écarté).
 # CORRECTION v3.4 (21/08/2026) :
 # - Watermark Silver : ne relit plus TOUT l'historique Bronze a chaque
 #   run (cause du timeout de 90min du 21/08/2026), seulement les
 #   fichiers non encore traites avec succes. Voir silver_meta.load_watermark.
 
 import os
+import re
 import sys
 import json
 import logging
@@ -105,6 +124,7 @@ ON CONFLICT (contract_number) DO UPDATE SET
     paid_off_status    = EXCLUDED.paid_off_status,
     deal_type          = EXCLUDED.deal_type,
     signing_date       = EXCLUDED.signing_date,
+    registration_date  = EXCLUDED.registration_date,   -- deployDate : vide tant que le kit n'est pas déployé
     last_status_update = EXCLUDED.last_status_update,
     next_status_update = EXCLUDED.next_status_update,
     paid_off_date      = EXCLUDED.paid_off_date,
@@ -114,6 +134,13 @@ ON CONFLICT (contract_number) DO UPDATE SET
     remaining_debt     = EXCLUDED.remaining_debt,
     upfront_payment    = EXCLUDED.upfront_payment,
     monthly_payment    = EXCLUDED.monthly_payment,
+    product_name       = COALESCE(EXCLUDED.product_name,  silver.upya_contracts.product_name),
+    asset_number       = COALESCE(EXCLUDED.asset_number,  silver.upya_contracts.asset_number),
+    client_number      = COALESCE(EXCLUDED.client_number, silver.upya_contracts.client_number),
+    customer_name      = COALESCE(EXCLUDED.customer_name, silver.upya_contracts.customer_name),
+    agent_number       = COALESCE(EXCLUDED.agent_number,  silver.upya_contracts.agent_number),
+    agent_name         = COALESCE(EXCLUDED.agent_name,    silver.upya_contracts.agent_name),
+    region             = COALESCE(EXCLUDED.region,        silver.upya_contracts.region),
     sub_prefecture     = EXCLUDED.sub_prefecture,
     district           = EXCLUDED.district,
     village            = EXCLUDED.village,
@@ -123,15 +150,26 @@ ON CONFLICT (contract_number) DO UPDATE SET
 """
 
 
+DATES_ILLISIBLES = []
+
+
 def parse_date(v):
+    """Date ISO de l'API UPYA. Une date non vide illisible est mémorisée
+    (DATES_ILLISIBLES) et signalée en fin de chargement."""
     if not v:
         return None
+    txt = str(v).strip()
     for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
         try:
-            return datetime.strptime(v, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(txt, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
-    return None
+    try:
+        d = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except ValueError:
+        DATES_ILLISIBLES.append(txt)
+        return None
 
 
 def parse_amount(v):
@@ -167,7 +205,7 @@ def transform_contract(item):
     profile = client.get("profile") or {}
     first   = profile.get("firstName", "") or ""
     last    = profile.get("lastName", "")  or ""
-    if "test" in first.lower() or "test" in last.lower():
+    if re.search(r"\btest\b", f"{first} {last}", flags=re.IGNORECASE):
         return None
 
     entity  = item.get("entity")  or {}
@@ -201,7 +239,7 @@ def transform_contract(item):
         str(paidoff_status),
         item.get("type"),
         parse_date(item.get("signingDate")),
-        parse_date(item.get("signingDate")),
+        parse_date(item.get("deployDate")),
         parse_date(item.get("lastStatusUpdate")),
         parse_date(item.get("nextStatusUpdate")),
         parse_date(item.get("paidOffDate") or item.get("paidoffDate")),
@@ -231,7 +269,7 @@ def load_contracts(date=None):
     start_time = time.time()
 
     logger.info("=" * 50)
-    logger.info("SILVER LOADER — UPYA CONTRACTS v3.4")
+    logger.info("SILVER LOADER — UPYA CONTRACTS v3.5")
     logger.info("=" * 50)
 
     minio_client = get_minio_client()
@@ -323,9 +361,12 @@ def load_contracts(date=None):
         )
     cur.close()
 
+    if DATES_ILLISIBLES:
+        logger.warning(f"{len(DATES_ILLISIBLES)} date(s) non lue(s), exemples : {DATES_ILLISIBLES[:5]}")
+
     duration = time.time() - start_time
     logger.info("=" * 50)
-    logger.info(f"SILVER CONTRACTS v3.4 TERMINÉ")
+    logger.info(f"SILVER CONTRACTS v3.5 TERMINÉ")
     logger.info(f"   Lignes   : {total_rows:,}")
     logger.info(f"   Erreurs  : {total_errors}")
     logger.info(f"   Durée    : {duration:.1f}s")
