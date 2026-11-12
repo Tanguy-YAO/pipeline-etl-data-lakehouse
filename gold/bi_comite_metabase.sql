@@ -719,7 +719,7 @@ BEGIN
         CASE WHEN a.categorie IN ('upya_tevia', 'surge_tevia') THEN 'Comité TEVIA'
              WHEN a.categorie = 'upya_greeno'                  THEN 'Comité GREENO'
              ELSE 'Hors comité' END,
-        CASE t.normalized_reason WHEN 'recharge' THEN 'Recharge' ELSE 'Acompte' END,
+        CASE t.normalized_reason WHEN 'recharge' THEN 'Recharge' ELSE 'Deposit' END,
         t.amount,
         a.commercial,
         a.regional,

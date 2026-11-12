@@ -1,12 +1,17 @@
 -- ============================================================================
--- pdg-vues-strategiques-v1.sql  (12/11/2026)
+-- pdg-vues-strategiques-v2.sql  (12/11/2026)
+-- v2 : vocabulaire aligné sur tous les tableaux de bord : « commande payée »
+--   (contrat signé, deposit réglé) au lieu de « vente », « deposit » au lieu
+--   d'« acompte » ; valeur des commandes payées = deposits réellement payés.
+--   Noms de colonnes inchangés (ventes, valeur_ventes, acomptes) pour ne pas
+--   casser les questions Metabase ; libellés et commentaires mis à jour.
 -- Couche « PDG » de DELTA : vues stratégiques documentées, lues par le
 -- tableau de bord Metabase du PDG et interrogeables directement par une IA
 -- (chaque vue et chaque colonne porte un commentaire en base).
 --
 -- Schéma pdg
---   pdg.v_ventes_installations_jour  ventes et installations UPYA par jour
---   pdg.v_collecte_jour              encaissements par jour (recharges, acomptes)
+--   pdg.v_ventes_installations_jour  commandes payées et installations UPYA par jour
+--   pdg.v_collecte_jour              encaissements par jour (recharges, deposits)
 --   pdg.v_portefeuille_jour          portefeuille par photo quotidienne
 --   pdg.v_kpi_mensuel                synthèse mensuelle par entité, avec variations
 --   pdg.dictionnaire                 définitions des indicateurs (pour l'IA)
@@ -16,9 +21,25 @@
 --   retard en jours consécutifs pour toutes les entités ; PAR = rapport de
 --   sommes d'encours ; actif = ENABLED ou LOCKED ; perte à 180 jours.
 --
+-- Étape 0 (v2) : bi.collecte nomme « Deposit » les paiements initiaux (au lieu
+--   d'« Acompte »), comme les tableaux de bord.
+--
 -- Exécution : tout le fichier d'un bloc dans pgAdmin. Puis, à part, donner un
 -- mot de passe au rôle (voir la fin du fichier).
 -- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- 0. bi.collecte : « Deposit » au lieu d'« Acompte » (fonction et données)
+-- ----------------------------------------------------------------------------
+DO $do$
+DECLARE d text := pg_get_functiondef('bi.rafraichir_collecte()'::regprocedure);
+BEGIN
+    IF position($a$ELSE 'Acompte' END$a$ IN d) > 0 THEN
+        EXECUTE replace(d, $a$ELSE 'Acompte' END$a$, $a$ELSE 'Deposit' END$a$);
+    END IF;
+END
+$do$;
+UPDATE bi.collecte SET type_paiement = 'Deposit' WHERE type_paiement = 'Acompte';
 
 CREATE SCHEMA IF NOT EXISTS pdg;
 COMMENT ON SCHEMA pdg IS
@@ -26,10 +47,16 @@ COMMENT ON SCHEMA pdg IS
 
 
 -- ----------------------------------------------------------------------------
--- 1. Ventes et installations par jour (contrats créés dans UPYA)
+-- 1. Commandes payées et installations par jour (contrats créés dans UPYA)
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW pdg.v_ventes_installations_jour AS
-WITH inst AS MATERIALIZED (
+WITH dep AS MATERIALIZED (
+    SELECT contract_number::text AS numero_contrat, SUM(amount) AS montant
+    FROM gold.unified_transactions
+    WHERE normalized_reason = 'upfront_payment' AND COALESCE(ignore_payment, false) = false
+    GROUP BY 1
+),
+inst AS MATERIALIZED (
     SELECT contract_number, MIN(deploy_date)::date AS d
     FROM silver.upya_assets
     WHERE deploy_date IS NOT NULL AND contract_number IS NOT NULL
@@ -41,9 +68,10 @@ c AS MATERIALIZED (
            COALESCE(NULLIF(TRIM(c.product_name), ''), 'Non renseigné')         AS produit,
            CASE WHEN c.onboarding_status = 'Signed' THEN c.signing_date::date END AS date_vente,
            i.d                                                                  AS date_installation,
-           COALESCE(c.total_cost, 0)                                            AS valeur
+           COALESCE(dp.montant, 0)                                              AS valeur
     FROM silver.upya_contracts c
     LEFT JOIN inst i ON i.contract_number = c.contract_number
+    LEFT JOIN dep dp ON dp.numero_contrat = c.contract_number
     WHERE c.contract_number !~ '^[NT][0-9]+$'           -- migrés SURGE exclus (anciennes ventes)
       AND c.updated_at >= (SELECT MAX(updated_at) FROM silver.upya_contracts) - INTERVAL '2 hours'
 )
@@ -61,11 +89,11 @@ FROM (
 GROUP BY 1, 2, 3;
 
 COMMENT ON VIEW pdg.v_ventes_installations_jour IS
-'Ventes (contrats signés) et installations (premier déploiement de kit) par jour, entité et produit. Contrats créés dans UPYA uniquement : les contrats migrés de SURGE (numéros T…, N…) sont exclus. Historique complet depuis l''ouverture d''UPYA.';
-COMMENT ON COLUMN pdg.v_ventes_installations_jour.jour IS 'Date de signature pour les ventes, date du premier déploiement pour les installations';
+'Commandes payées (contrats signés, deposit réglé) et installations (premier déploiement de kit) par jour, entité et produit. Contrats créés dans UPYA uniquement : les contrats migrés de SURGE (numéros T…, N…) sont exclus. Historique complet depuis l''ouverture d''UPYA. Colonnes ventes et valeur_ventes = commandes payées.';
+COMMENT ON COLUMN pdg.v_ventes_installations_jour.jour IS 'Date de signature pour les commandes payées, date du premier déploiement pour les installations';
 COMMENT ON COLUMN pdg.v_ventes_installations_jour.entite IS 'TEVIA ou GREENO (produit commençant par GREENO)';
-COMMENT ON COLUMN pdg.v_ventes_installations_jour.ventes IS 'Nombre de contrats signés ce jour';
-COMMENT ON COLUMN pdg.v_ventes_installations_jour.valeur_ventes IS 'Valeur totale des contrats signés ce jour, en FCFA';
+COMMENT ON COLUMN pdg.v_ventes_installations_jour.ventes IS 'Commandes payées : nombre de contrats signés ce jour';
+COMMENT ON COLUMN pdg.v_ventes_installations_jour.valeur_ventes IS 'Valeur des commandes payées : deposits réellement payés (tous paiements de deposit acceptés) par les commandes signées ce jour, en FCFA';
 COMMENT ON COLUMN pdg.v_ventes_installations_jour.installations IS 'Nombre de kits installés ce jour';
 
 
@@ -84,9 +112,9 @@ FROM bi.collecte
 GROUP BY 1, 2, 3, 4;
 
 COMMENT ON VIEW pdg.v_collecte_jour IS
-'Encaissements acceptés par jour depuis le 01/01/2025, par entité et type (Recharge = remboursement du crédit, Acompte = paiement initial). Paiements SURGE rattachés au numéro migré. Recalculée chaque nuit.';
+'Encaissements acceptés par jour depuis le 01/01/2025, par entité et type (Recharge = remboursement du crédit, Deposit = paiement initial). Paiements SURGE rattachés au numéro migré. Recalculée chaque nuit.';
 COMMENT ON COLUMN pdg.v_collecte_jour.perimetre IS 'Comité TEVIA (upya_tevia + surge_tevia), Comité GREENO (upya_greeno) ou Hors comité (NEoTCI, ZECI)';
-COMMENT ON COLUMN pdg.v_collecte_jour.type_paiement IS 'Recharge ou Acompte';
+COMMENT ON COLUMN pdg.v_collecte_jour.type_paiement IS 'Recharge ou Deposit';
 COMMENT ON COLUMN pdg.v_collecte_jour.montant IS 'Montant encaissé en FCFA';
 
 
@@ -126,7 +154,7 @@ COMMENT ON COLUMN pdg.v_portefeuille_jour.par30 IS 'PAR30 : part de l''encours p
 COMMENT ON COLUMN pdg.v_portefeuille_jour.par90 IS 'PAR90 (0 à 1)';
 COMMENT ON COLUMN pdg.v_portefeuille_jour.par180 IS 'PAR180 : part de l''encours à 180 jours et plus, seuil de passage en perte (0 à 1)';
 COMMENT ON COLUMN pdg.v_portefeuille_jour.par30_hors_perte IS 'PAR30 calculé sans les contrats à 180 jours et plus : qualité du portefeuille encore récupérable (0 à 1)';
-COMMENT ON COLUMN pdg.v_portefeuille_jour.taux_fpd IS 'First payment default : actifs de plus de 30 jours n''ayant rien payé (ou moins d''une mensualité) au-delà de l''acompte, hors 120 jours et plus (0 à 1)';
+COMMENT ON COLUMN pdg.v_portefeuille_jour.taux_fpd IS 'First payment default : actifs de plus de 30 jours n''ayant rien payé (ou moins d''une mensualité) au-delà du deposit, hors 120 jours et plus (0 à 1)';
 
 
 -- ----------------------------------------------------------------------------
@@ -141,7 +169,7 @@ WITH vi AS (
 col AS (
     SELECT date_trunc('month', jour)::date AS mois, entite,
            SUM(montant) FILTER (WHERE type_paiement = 'Recharge') AS recharges,
-           SUM(montant) FILTER (WHERE type_paiement = 'Acompte')  AS acomptes,
+           SUM(montant) FILTER (WHERE type_paiement = 'Deposit')  AS acomptes,
            SUM(montant)                                           AS encaissements
     FROM pdg.v_collecte_jour GROUP BY 1, 2
 ),
@@ -177,9 +205,9 @@ FROM m
 WINDOW w AS (PARTITION BY m.entite ORDER BY m.mois);
 
 COMMENT ON VIEW pdg.v_kpi_mensuel IS
-'Synthèse stratégique par mois et par entité : ventes, installations, encaissements, et portefeuille à la dernière photo du mois. Variations par rapport au mois précédent (var_* en ratio, 0.1 = +10 % ; var_par30_points en points de ratio). Le mois en cours est partiel (mois_en_cours = true) : ne pas le comparer tel quel au mois précédent. Portefeuille disponible depuis octobre 2026, encaissements depuis janvier 2025.';
+'Synthèse stratégique par mois et par entité : commandes payées (colonnes ventes, valeur_ventes), installations, encaissements (recharges, deposits dans la colonne acomptes), et portefeuille à la dernière photo du mois. Variations par rapport au mois précédent (var_* en ratio, 0.1 = +10 % ; var_par30_points en points de ratio). Le mois en cours est partiel (mois_en_cours = true) : ne pas le comparer tel quel au mois précédent. Portefeuille disponible depuis octobre 2026, encaissements depuis janvier 2025.';
 COMMENT ON COLUMN pdg.v_kpi_mensuel.mois IS 'Premier jour du mois';
-COMMENT ON COLUMN pdg.v_kpi_mensuel.encaissements IS 'Recharges + acomptes encaissés dans le mois, en FCFA';
+COMMENT ON COLUMN pdg.v_kpi_mensuel.encaissements IS 'Recharges + deposits encaissés dans le mois, en FCFA';
 COMMENT ON COLUMN pdg.v_kpi_mensuel.date_photo IS 'Date de la photo de portefeuille retenue (dernière du mois)';
 COMMENT ON COLUMN pdg.v_kpi_mensuel.mois_en_cours IS 'Mois non terminé : chiffres partiels';
 
@@ -202,11 +230,12 @@ INSERT INTO pdg.dictionnaire VALUES
 ('PAR N', 'Part de l''encours portée par des clients en retard de plus de N jours. Mesure en montant, pas en nombre de clients.', 'encours des clients en retard > N j / encours actif', 'pdg.v_portefeuille_jour'),
 ('PAR180', 'Part de l''encours à 180 jours et plus : seuil de passage en perte.', 'encours ≥ 180 j / encours actif', 'pdg.v_portefeuille_jour.par180'),
 ('PAR30 hors perte', 'PAR30 sur le seul portefeuille encore récupérable (sans les 180 jours et plus).', '(encours > 30 j − encours ≥ 180 j) / (encours − encours ≥ 180 j)', 'pdg.v_portefeuille_jour.par30_hors_perte'),
-('Taux FPD', 'First payment default : clients actifs de plus de 30 jours qui n''ont rien payé, ou moins d''une mensualité, au-delà de l''acompte. Hors 120 jours et plus.', 'FPD / actifs évaluables', 'pdg.v_portefeuille_jour.taux_fpd'),
-('Vente', 'Contrat signé dans UPYA (statut Signed), daté du jour de signature. Les migrés SURGE ne sont pas des ventes.', 'Nombre de contrats signés', 'pdg.v_ventes_installations_jour'),
+('Taux FPD', 'First payment default : clients actifs de plus de 30 jours qui n''ont rien payé, ou moins d''une mensualité, au-delà du deposit. Hors 120 jours et plus.', 'FPD / actifs évaluables', 'pdg.v_portefeuille_jour.taux_fpd'),
+('Commande payée', 'Contrat signé dans UPYA (statut Signed, deposit réglé), daté du jour de signature. Les migrés SURGE ne sont pas des commandes payées. Colonne ventes.', 'Nombre de contrats signés', 'pdg.v_ventes_installations_jour'),
+('Valeur des commandes payées', 'Deposits réellement payés par les commandes payées (tous paiements de deposit acceptés). Colonne valeur_ventes.', 'Somme des deposits payés', 'pdg.v_ventes_installations_jour'),
 ('Installation', 'Premier déploiement d''un kit pour le contrat.', 'Nombre de contrats au premier déploiement', 'pdg.v_ventes_installations_jour'),
 ('Recharge', 'Paiement de remboursement du crédit par le client.', 'Somme des paiements acceptés de type recharge', 'pdg.v_collecte_jour'),
-('Acompte', 'Paiement initial versé à la signature.', 'Somme des paiements de type acompte', 'pdg.v_collecte_jour'),
+('Deposit', 'Paiement initial versé à la commande, parfois en plusieurs fois (GREENO surtout).', 'Somme des paiements de type deposit', 'pdg.v_collecte_jour'),
 ('Photo', 'État du portefeuille enregistré chaque nuit ; le passé ne se réécrit pas. Historique depuis le 01/10/2026.', 'bi.calendrier', 'pdg.v_portefeuille_jour.jour');
 COMMENT ON TABLE pdg.dictionnaire IS 'Définitions des indicateurs DELTA. À lire en premier par toute IA qui interroge le schéma pdg.';
 
