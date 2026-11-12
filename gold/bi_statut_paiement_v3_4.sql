@@ -7,7 +7,8 @@
 -- retard : seul un client en retard peut avoir des jours de retard.
 --   1. En avance       : aucun jour de retard et payé > attendu
 --                        (attendu = acompte + mensualité × (mois complets − 1))
---   2. À jour          : aucun jour de retard, sans avance sur l'attendu
+--   2. Normal          : aucun jour de retard, sans avance sur l'attendu
+--                        (libellé distinct de la tranche « 0. À jour », 12/11)
 --   3. En retard       : au moins un jour de retard consécutif
 --   4. Retard inconnu  : actif sans date permettant de calculer le retard
 -- Montant en retard (colonne arriere_s1) : jours de retard × mensualité / 30,
@@ -126,7 +127,7 @@ CREATE OR REPLACE VIEW bi.v_portefeuille_date AS
             WHEN k.retard IS NULL THEN '4. Retard inconnu'::text
             WHEN k.retard > 0 THEN '3. En retard'::text
             WHEN k.paye > k.att THEN '1. En avance'::text
-            ELSE '2. À jour'::text
+            ELSE '2. Normal'::text
         END AS classe_s1,
         CASE
             WHEN k.actif THEN k.att
