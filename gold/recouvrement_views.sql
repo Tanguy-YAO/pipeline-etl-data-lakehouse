@@ -1,5 +1,10 @@
 -- delta/recouvrement-views.sql
 -- Couche de service de l'application de recouvrement (AppSheet)
+-- v6.10, 12/11/2026 : GREENO suit la logique TEVIA : tranches, seuils de perte,
+--   solde en jours, jours manqués, attendu et arriéré. Les colonnes *_greeno
+--   restent comme information brute de l'application GREENO.
+--   (en direct en base par recouvrement-greeno-consecutif.sql)
+--
 -- v6.5, 20/10/2026
 --
 -- Changement v6.5 : contrats_greeno gagne jour_paiement_greeno (jour du mois de
@@ -531,21 +536,18 @@ SELECT
     --   TEVIA  : date de next_status_update - date du jour
     --   GREENO : plus ancienne échéance non couverte (acompte compris) - date du jour ;
     --            NULL si soldé
-    CASE WHEN b.categorie = 'upya_greeno'
-         THEN b.echeance_non_couverte_greeno - CURRENT_DATE
-         ELSE b.prochaine_echeance - CURRENT_DATE
-    END                                                           AS solde_jours,
+    --   12/11/2026 : GREENO suit la règle TEVIA (next_status_update)
+    b.prochaine_echeance - CURRENT_DATE                           AS solde_jours,
     (b.contract_status = 'ENABLED'
      AND b.prochaine_echeance - CURRENT_DATE BETWEEN 0 AND 3)     AS expire_sous_3_jours,
 
     -- Statut et retard
     b.contract_status                                             AS statut_contrat,
     b.jours_retard,
-    -- Tranches de retard
-    --   TEVIA  : jours de blocage consécutifs (jours_retard)
-    --   GREENO : mensualités manquées cumulées (mois_manques_greeno), 1 mois ≈ 30 jours
+    -- Tranches de retard : jours consécutifs (jours_retard) pour toutes les
+    --   catégories, GREENO compris (décision du 12/11/2026 ; avant, GREENO était
+    --   classé en mensualités manquées cumulées, restées dans mois_manques_greeno)
     CASE
-        WHEN b.categorie = 'upya_greeno' THEN LEAST(COALESCE(b.mois_manques_greeno, 0), 7)
         WHEN b.jours_retard = 0               THEN 0
         WHEN b.jours_retard <= 30             THEN 1
         WHEN b.jours_retard <= 60             THEN 2
@@ -556,13 +558,6 @@ SELECT
         ELSE 7
     END                                                           AS tranche_ordre,
     CASE
-        WHEN b.categorie = 'upya_greeno' THEN
-            CASE
-                WHEN COALESCE(b.mois_manques_greeno, 0) = 0 THEN 'À jour'
-                WHEN b.mois_manques_greeno = 1              THEN '1 mois manqué'
-                WHEN b.mois_manques_greeno < 7              THEN b.mois_manques_greeno || ' mois manqués'
-                ELSE '7 mois manqués et plus'
-            END
         WHEN b.jours_retard = 0               THEN 'À jour'
         WHEN b.jours_retard <= 30             THEN '1-30 j'
         WHEN b.jours_retard <= 60             THEN '31-60 j'
@@ -572,11 +567,9 @@ SELECT
         WHEN b.jours_retard <  180            THEN '151-179 j'
         ELSE '180 j et plus'                       -- même limite que perte_seuil_credit
     END                                                           AS tranche_retard,
-    -- Seuils de perte : GREENO en mensualités manquées (4 mois ≈ 120 j, 6 mois ≈ 180 j)
-    CASE WHEN b.categorie = 'upya_greeno' THEN COALESCE(b.mois_manques_greeno, 0) > 4
-         ELSE b.jours_retard > 120 END                            AS perte_seuil_efa,
-    CASE WHEN b.categorie = 'upya_greeno' THEN COALESCE(b.mois_manques_greeno, 0) >= 6
-         ELSE b.jours_retard >= 180 END                           AS perte_seuil_credit,
+    -- Seuils de perte : jours consécutifs pour toutes les catégories (12/11/2026)
+    (b.jours_retard > 120)                                        AS perte_seuil_efa,
+    (b.jours_retard >= 180)                                       AS perte_seuil_credit,
     (b.consecutive_locked_days IS NULL)                           AS jours_retard_inconnu,
     -- Jours sans crédit depuis l'activation, coupure en cours comprise.
     --   GREENO : jours_retard_greeno (retard cumulé sur l'échéancier fixe)
@@ -584,7 +577,8 @@ SELECT
     --   achetés (30 j d'acompte + paiements nets / tarif journalier) - crédit
     --   restant. Plafonné à age_jours, puis jamais inférieur à jours_retard : la
     --   coupure en cours (donnée UPYA) prime, même si les dates source sont incohérentes.
-    CASE WHEN b.categorie = 'upya_greeno' THEN COALESCE(b.jours_retard_greeno, 0) ELSE
+    -- 12/11/2026 : GREENO suit la règle TEVIA (branche GREENO neutralisée)
+    CASE WHEN FALSE THEN NULL ELSE
     GREATEST(
         LEAST(
             b.age_jours,
@@ -614,13 +608,9 @@ SELECT
     -- Attendu et arriéré
     --   TEVIA  : acompte + accrual journalier après 30 jours de grâce
     --   GREENO : acompte + mensualités fixes échues (paliers) ; arriéré = RAR
-    ROUND(CASE WHEN b.categorie = 'upya_greeno'
-               THEN b.upfront_payment + b.echeances_dues_greeno * b.monthly_payment
-               ELSE b.attendu_a_date END)                         AS attendu_a_date,
-    ROUND(CASE WHEN b.categorie = 'upya_greeno'
-               THEN b.rar_greeno
-               ELSE GREATEST(b.attendu_a_date - COALESCE(b.total_paid, 0), 0) END)
-                                                                  AS arriere,
+    --   12/11/2026 : GREENO suit la règle TEVIA
+    ROUND(b.attendu_a_date)                                       AS attendu_a_date,
+    ROUND(GREATEST(b.attendu_a_date - COALESCE(b.total_paid, 0), 0)) AS arriere,
 
     -- Paiements
     sp.date_dernier_paiement,
