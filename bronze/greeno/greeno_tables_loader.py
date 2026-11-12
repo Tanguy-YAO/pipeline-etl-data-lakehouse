@@ -3,7 +3,8 @@
 # RÔLE : Loader générique pour les 130 tables BASE TABLE de la BD GREENO
 #        (Google Cloud SQL) → Silver PostgreSQL Railway
 #
-# APPROCHE : Full load (DROP + recreate) — ces tables n'ont pas de
+# APPROCHE : Full load (TRUNCATE + INSERT ; DROP + CREATE seulement si la
+#            structure change, depuis le 12/11/2026) — ces tables n'ont pas de
 #            colonne de modification fiable pour un watermark incrémental.
 #            Les volumes sont faibles (~190k lignes total) — full load
 #            tenable à chaque cycle.
@@ -126,14 +127,34 @@ def sync_table(src_conn, dst_conn, dst_log, table_name):
         col_insert   = ", ".join([f'"{c}"' for c in col_names])
 
         dst_cur = dst_conn.cursor()
-        dst_cur.execute(f"""
-            CREATE SCHEMA IF NOT EXISTS silver;
-            DROP TABLE IF EXISTS silver.{silver_table};
-            CREATE TABLE silver.{silver_table} (
-                {col_defs},
-                loaded_at TIMESTAMPTZ DEFAULT NOW()
-            );
-        """)
+        dst_cur.execute("CREATE SCHEMA IF NOT EXISTS silver")
+
+        # Colonnes actuelles de la table silver (hors loaded_at)
+        dst_cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'silver' AND table_name = %s
+              AND column_name <> 'loaded_at'
+            ORDER BY ordinal_position
+        """, (silver_table,))
+        cols_silver = [r[0] for r in dst_cur.fetchall()]
+
+        if cols_silver == col_names:
+            # Même structure : on vide et on recharge sans supprimer la table,
+            # pour ne pas casser les vues qui la lisent (recouvrement, credit).
+            # Avant le 12/11/2026, le DROP échouait dès qu'une vue en dépendait
+            # et la table restait figée (client_contrat_tevia depuis le 20/10).
+            dst_cur.execute(f"TRUNCATE silver.{silver_table}")
+        else:
+            # Nouvelle table ou structure changée côté GREENO : on la recrée.
+            # Si des vues en dépendent, l'erreur est loggée et la table garde
+            # ses données : adapter les vues puis relancer.
+            dst_cur.execute(f"""
+                DROP TABLE IF EXISTS silver.{silver_table};
+                CREATE TABLE silver.{silver_table} (
+                    {col_defs},
+                    loaded_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
 
         if rows_clean:
             execute_values(

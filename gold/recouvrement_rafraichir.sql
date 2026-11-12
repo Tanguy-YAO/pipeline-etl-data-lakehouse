@@ -1,5 +1,5 @@
 -- ============================================================================
--- gold/recouvrement_rafraichir.sql  (v6.8, 11/11/2026)
+-- gold/recouvrement_rafraichir.sql  (v6.9, 12/11/2026)
 -- Définition en vigueur de recouvrement.rafraichir(), appelée par l'étape
 -- « Recouvrement - Rafraichissement table contrats » du pipeline.
 --
@@ -12,6 +12,9 @@
 --          posé au remplissage de la table : contrats_tevia, contrats_greeno et
 --          contrats_neotci les perdent sans être modifiées ; vw_contrats reste
 --          complète (11 contrats « TEVIA Hotspot » actifs le 11/11).
+--   v6.9 (12/11/2026) : réglages de plan (enable_nestloop off, work_mem 256 Mo)
+--          attachés à la fonction : la copie de vw_contrats passait de 27 s à
+--          plus de 90 min avec le plan par défaut (boucles imbriquées).
 --
 -- Ce fichier fait foi pour rafraichir() : il remplace les définitions plus
 -- anciennes présentes dans recouvrement_views.sql et dans les scripts NEoTCI.
@@ -21,6 +24,11 @@
 CREATE OR REPLACE FUNCTION recouvrement.rafraichir()
 RETURNS void
 LANGUAGE plpgsql
+-- v6.9 : sans ces réglages, Postgres relit la synthèse des paiements de
+-- vw_contrats pour chaque contrat (plus de 90 min, pipeline coupé le 12/11) ;
+-- avec, la copie prend moins d'une minute.
+SET enable_nestloop = off
+SET work_mem = '256MB'
 AS $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM recouvrement.gel_mensuel
