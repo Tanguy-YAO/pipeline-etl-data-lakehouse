@@ -24,6 +24,8 @@ import os
 import sys
 import logging
 import time
+import json
+import urllib.request
 import psycopg2
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
@@ -220,6 +222,39 @@ def main():
     logger.info("=" * 50)
     logger.info(f"TERMINÉ — {total:,} lignes au total")
     logger.info("=" * 50)
+
+    declencher_pipeline_github()
+
+
+def declencher_pipeline_github():
+    """Lance le pipeline GitHub Actions (UPYA, SURGE, gold) juste après GREENO.
+
+    Les déclenchements planifiés de GitHub partent parfois avec plusieurs heures
+    de retard ; Railway lance donc lui-même la suite. Variable Railway requise :
+    GITHUB_PIPELINE_TOKEN (jeton fin, dépôt pipeline-etl-data-lakehouse,
+    permission Actions : lecture et écriture). Sans jeton, rien n'est lancé.
+    """
+    token = os.getenv("GITHUB_PIPELINE_TOKEN")
+    if not token:
+        logger.warning("GITHUB_PIPELINE_TOKEN absent : pipeline GitHub non déclenché")
+        return
+    url = ("https://api.github.com/repos/Tanguy-YAO/pipeline-etl-data-lakehouse"
+           "/actions/workflows/daily_pipeline.yml/dispatches")
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"ref": "master"}).encode(),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            logger.info(f"Pipeline GitHub déclenché (HTTP {r.status})")
+    except Exception as e:
+        logger.error(f"Échec du déclenchement du pipeline GitHub : {e}")
 
 
 if __name__ == "__main__":
