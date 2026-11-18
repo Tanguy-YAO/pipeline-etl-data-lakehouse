@@ -34,29 +34,24 @@
 -- existant, cette vue est TOUJOURS a jour sans aucune action supplementaire.
 
 CREATE OR REPLACE VIEW gold.upya_transactions AS
-SELECT
-    up.contract_number,
+SELECT up.contract_number,
     up.transaction_id,
     up.payment_date,
     up.payment_code,
     up.amount,
-    'Upya' AS source,
+    'upya'::text AS source,
     CASE
-        WHEN uc.deal_type = 'FULL' THEN 'upfront_payment'
-        WHEN up.payment_code IN ('DOWNPAYMENT_SUCCESS', 'INCOMPLETE_DOWNPAYMENT', 'FINAL_PAYMENT')
-            THEN 'upfront_payment'
-        WHEN up.payment_code IN ('PAYMENT_SUCCESS', 'INCOMPLETE_PAYMENT')
-            THEN 'recharge'
-        ELSE NULL
+        WHEN uc.deal_type = 'FULL'::text THEN 'upfront_payment'::text
+        WHEN up.payment_code = ANY (ARRAY['DOWNPAYMENT_SUCCESS'::text, 'INCOMPLETE_DOWNPAYMENT'::text, 'FINAL_PAYMENT'::text]) THEN 'upfront_payment'::text
+        WHEN up.payment_code = ANY (ARRAY['PAYMENT_SUCCESS'::text, 'INCOMPLETE_PAYMENT'::text]) THEN 'recharge'::text
+        ELSE NULL::text
     END AS normalized_reason,
     false AS is_accessory,
-    (
-        up.payment_code IS NULL
-        OR up.amount < 0
-        OR up.payment_code IN ('SURVEY_SUCCESS', 'UNASSIGNED_PAYMENT', 'PAYMENT_SUCCESS_PENALTY_CLEARED')
-        OR up.status = 'REVERSED'
-    ) AS ignore_payment,
+    up.payment_code IS NULL
+        OR up.amount < 0::numeric
+        OR (up.payment_code = ANY (ARRAY['SURVEY_SUCCESS'::text, 'UNASSIGNED_PAYMENT'::text, 'PAYMENT_SUCCESS_PENALTY_CLEARED'::text]))
+        OR up.status = 'REVERSED'::text AS ignore_payment,
     NULL::text AS asset_number,
-    'as_recorded' AS amount_basis
+    'as_recorded'::text AS amount_basis
 FROM silver.upya_payments up
 LEFT JOIN gold.unified_contracts uc ON uc.contract_number = up.contract_number;
