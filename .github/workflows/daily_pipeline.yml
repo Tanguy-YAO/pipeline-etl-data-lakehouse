@@ -54,7 +54,18 @@ jobs:
         run: |
           mkdir -p config
           echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > config/google_credentials.json
-
+          
+      - name: Diagnostic mot de passe UPYA (temporaire)
+        run: |
+          python -c "
+          import os
+          p = os.environ.get('UPYA_PASSWORD', '')
+          print('longueur :', len(p))
+          print('commence par un espace :', p.startswith(' '))
+          print('finit par un espace ou un retour ligne :', p != p.rstrip())
+          print('contient des guillemets :', '\"' in p)
+          "
+      
       - name: Bronze - Extraction contracts UPYA
         run: python bronze/upya/generic_extractor.py contracts
 
